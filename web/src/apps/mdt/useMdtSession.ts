@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { useAsyncData } from '@/hooks/useAsyncData';
 import { useSessionState } from '@/hooks/useSessionState';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useDeckActive } from '@/shell/deckActive';
 
 import { mdtViewEnter } from './mdtTheme';
@@ -128,6 +129,7 @@ export function useMdtSessionState(devDomain?: DepartmentType): MdtSessionValue 
     const selectTab = useCallback((id: string) => setActive(id), [setActive]);
 
     const { data, loading, refetch } = useAsyncData(() => mdtBootstrap(devDomain), [devDomain]);
+    useNuiEvent('sd-phone:mdt:offences', refetch);
     const [settled, setSettled] = useState(false);
 
     useEffect(() => {

@@ -397,4 +397,36 @@ function store.markMissedSeen(citizenid)
     )
 end
 
+---A player's contacts whose name or number contains `q`, alphabetised. Read-only.
+---@param citizenid string
+---@param q string
+---@param limit integer
+---@return table[]
+function store.search(citizenid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT id, name, phone, avatar, color
+        FROM phone_contacts
+        WHERE citizenid = ? AND (name LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\')
+        ORDER BY name ASC
+        LIMIT %d
+    ]]):format(limit), { citizenid, like, like }) or {}
+end
+
+---A player's call-log rows whose number or name contains `q`, newest first. Read-only.
+---@param citizenid string
+---@param q string
+---@param limit integer
+---@return { id: string, number: string, name: string|nil, called_at: integer }[]
+function store.searchCalls(citizenid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT id, `number` AS number, name, called_at
+        FROM phone_calls
+        WHERE citizenid = ? AND (`number` LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
+        ORDER BY called_at DESC
+        LIMIT %d
+    ]]):format(limit), { citizenid, like, like }) or {}
+end
+
 return store

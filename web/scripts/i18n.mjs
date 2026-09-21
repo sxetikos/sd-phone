@@ -377,13 +377,21 @@ function cmdCheck() {
     }
 
     // A translation that drops or renames a {placeholder} renders the raw span to the player,
-    // so every catalogue value must carry exactly the same set as its English source.
+    // so every catalogue value must carry exactly the same set as its English source. The
+    // English plural suffixes {s} and {plural} are the exception: a language without plural
+    // endings (Chinese, Thai) may leave them out rather than print a stray "s".
     if (en) {
-        const spans = s => (s.match(/\{[a-zA-Z][a-zA-Z0-9_]*\}/g) || []).sort().join(',');
+        const PLURAL_SUFFIX = new Set(['{s}', '{plural}']);
+        const spans = s => (s.match(/\{[a-zA-Z][a-zA-Z0-9_]*\}/g) || []).sort();
+        const mismatched = (translated, source) => {
+            const have = spans(translated);
+            const want = spans(source).filter(p => !PLURAL_SUFFIX.has(p) || have.includes(p));
+            return have.join(',') !== want.join(',');
+        };
         for (const code of languages()) {
             let cat;
             try { cat = readCatalogue(code); } catch { continue; }
-            const broken = Object.keys(cat).filter(k => k in en && spans(cat[k]) !== spans(en[k]));
+            const broken = Object.keys(cat).filter(k => k in en && mismatched(cat[k], en[k]));
             if (broken.length) {
                 bad += broken.length;
                 console.error(`\n${code}: ${broken.length} value(s) with mismatched {placeholders}:`);

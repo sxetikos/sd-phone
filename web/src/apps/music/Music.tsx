@@ -27,6 +27,7 @@ import {
     shareTrack, sharePlaylist,
 } from './data';
 import { useMusicLibrary } from '@/stores/musicLibraryStore';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import type { AlbumGroup, ArtistGroup, Folder, Track } from './data';
 
 const PUSH = 'ios-push 0.32s cubic-bezier(0.32,0.72,0,1)';
@@ -151,6 +152,16 @@ export function Music({ onClose: _onClose }: { onClose: () => void }) {
         setStack(s => s.slice(0, -1));
     }
     function switchTab(t: MusicTab) { navAnim.current = TAB; setStack([]); setTab(t); exitEdit(); }
+
+    useDeeplinkTarget('music', target => {
+        navAnim.current = TAB;
+        window.clearTimeout(exitTimer.current);
+        setExiting(null);
+        setEditing(false);
+        setExpanded(false);
+        setTab('library');
+        setStack(target.playlistId ? [{ kind: 'playlist', id: String(target.playlistId) }] : [{ kind: 'songs' }]);
+    });
 
     function backLabel(): string {
         if (stack.length <= 1) return TAB_TITLE[tab];

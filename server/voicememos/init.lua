@@ -17,6 +17,8 @@ local player   = require 'bridge.server.player'
 local mediaLimit = require 'server.photos.mediaLimit'
 ---@type table Presigned upload slots (server.photos.presign): mint + claim for the direct path.
 local presign  = require 'server.photos.presign'
+---@type table HTTP upload ingest (server.media.httpUpload): single-use slots on the server's HTTP port.
+local httpUpload = require 'server.media.httpUpload'
 ---@type table Shared server helpers (server.util): the player-drop cleanup hook.
 local util     = require 'server.util'
 ---@type table AirShare core (server.share.core): per-kind delivery handler registry.
@@ -109,14 +111,23 @@ end)
 
 util.onCleanup(function(src) pendingDirect[src] = nil end)
 
----Audio upload: the client sends a base64 audio data-URL, pushed to Fivemanage and persisted via
----actions.saveUploaded. Gated: data:audio/ prefix, VM.MaxAudioBytes cap, one upload per src.
----@param payload table client payload { audio: string, name?: string, duration?: number }
-RegisterNetEvent('sd-phone:server:voice:upload', function(payload)
-    local src = source
-    payload = type(payload) == 'table' and payload or {}
-    local audio = payload.audio
+---The sentence a player sees when the upload budget or pacing refuses them.
+---@param why string|nil 'cooldown'|'busy'|'identity'|'budget'|'server'
+---@return string message
+local function refusal(why)
+    if why == 'cooldown' then return 'Slow down a moment' end
+    if why == 'busy' then return 'Upload already in progress' end
+    return 'Upload limit reached, try again later'
+end
 
+---Takes a recorded memo as a base64 audio data-URL, pushes it to the media provider and saves it.
+---Gated: data:audio/ prefix, VM.MaxAudioBytes cap, one upload per src, the shared upload budget.
+---@param src integer
+---@param audio any The data-URL as the client sent it.
+---@param name string|nil
+---@param duration number|nil
+---@param prepaid boolean|nil true when an HTTP slot already holds the budget for it
+local function ingest(src, audio, name, duration, prepaid)
     if type(audio) ~= 'string' or not lib.string.startsWith(audio, 'data:audio/') then
         TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, 'Bad audio payload')
         return
@@ -129,10 +140,12 @@ RegisterNetEvent('sd-phone:server:voice:upload', function(payload)
         TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, 'Upload already in progress')
         return
     end
-    local okLimit, why = mediaLimit.charge(src, #audio)
-    if not okLimit then
-        TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, why == 'cooldown' and 'Slow down a moment' or 'Upload limit reached, try again later')
-        return
+    if not prepaid then
+        local okLimit, why = mediaLimit.charge(src, #audio)
+        if not okLimit then
+            TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, refusal(why))
+            return
+        end
     end
 
     local ext = audio:find('^data:audio/mpeg') and 'mp3'
@@ -149,11 +162,40 @@ RegisterNetEvent('sd-phone:server:voice:upload', function(payload)
             TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, err or 'Upload failed')
             return
         end
-        local memo = actions.saveUploaded(src, url, payload.name, payload.duration)
+        local memo = actions.saveUploaded(src, url, name, duration)
         if memo then
             TriggerClientEvent('sd-phone:client:voice:added', src, memo)
         else
             TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, 'Could not save memo')
         end
     end)
+end
+
+---Audio upload over a game network event: the fallback for a phone that could not reach the
+---server's HTTP port.
+---@param payload table client payload { audio: string, name?: string, duration?: number }
+RegisterNetEvent('sd-phone:server:voice:upload', function(payload)
+    local src = source
+    payload = type(payload) == 'table' and payload or {}
+    ingest(src, payload.audio, payload.name, payload.duration)
+end)
+
+---React -> server: open an HTTP upload slot for a memo. The name and duration are settled here,
+---so the body that follows is nothing but the recording.
+lib.callback.register('sd-phone:server:voice:httpSlot', function(src, payload)
+    payload = type(payload) == 'table' and payload or {}
+    local name, duration = payload.name, payload.duration
+
+    local slot, why = nil, 'busy'
+    if not uploading[src] then
+        slot, why = httpUpload.mint(src, VM.MaxAudioBytes, function(owner, body)
+            ingest(owner, body, name, duration, true)
+            return { success = true }
+        end)
+    end
+    if not slot then
+        TriggerClientEvent('sd-phone:client:voice:uploadFailed', src, refusal(why))
+        return { success = false, code = why }
+    end
+    return { success = true, data = slot }
 end)

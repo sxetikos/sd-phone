@@ -408,4 +408,22 @@ function store.countFolders(cid)
     return MySQL.scalar.await('SELECT COUNT(*) FROM `phone_document_folders` WHERE citizenid = ?', { cid }) or 0
 end
 
+---A player's documents whose name contains `q`, or text documents whose content does,
+---newest-edited first. Read-only.
+---@param cid string owner citizenid
+---@param q string
+---@param limit integer
+---@return { id: string, name: string, kind: string, content: string|nil }[]
+function store.search(cid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT id, name, kind, content
+        FROM `phone_documents`
+        WHERE citizenid = ?
+          AND (name LIKE ? ESCAPE '\\' OR (kind = 'text' AND content LIKE ? ESCAPE '\\'))
+        ORDER BY updated_at DESC
+        LIMIT %d
+    ]]):format(limit), { cid, like, like }) or {}
+end
+
 return store

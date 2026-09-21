@@ -92,4 +92,20 @@ function store.delete(id)
     MySQL.query.await('DELETE FROM `phone_voice_memos` WHERE id = ?', { id })
 end
 
+---A player's memos whose name contains `q`, newest first. Read-only.
+---@param citizenid string owner's framework per-character id
+---@param q string
+---@param limit integer
+---@return { id: integer, name: string, duration: integer }[]
+function store.search(citizenid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT id, name, duration
+        FROM `phone_voice_memos`
+        WHERE citizenid = ? AND name LIKE ? ESCAPE '\\'
+        ORDER BY id DESC
+        LIMIT %d
+    ]]):format(limit), { citizenid, like }) or {}
+end
+
 return store

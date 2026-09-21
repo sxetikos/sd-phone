@@ -1,5 +1,7 @@
----@type fun(nuiAction: string, serverEvent: string) NUI->server pass-through registrar (client.nui).
+---@type fun(nuiAction: string, serverEvent: string, onAccepted?: fun(), transform?: fun(res: table)) NUI->server pass-through registrar (client.nui).
 local proxy = require 'client.nui'
+---@type fun(res: table) Completes an HTTP upload slot with this client's server address (client.uploadurl).
+local uploadUrl = require 'client.uploadurl'
 
 -- Thin delegates into server/voicememos.
 proxy('sd-phone:voice:list',   'sd-phone:server:voice:list')
@@ -35,3 +37,6 @@ end)
 -- and the event path stays as the fallback for whenever that cannot run.
 proxy('sd-phone:voice:uploadSlot', 'sd-phone:server:voice:uploadSlot')
 proxy('sd-phone:voice:uploadDone', 'sd-phone:server:voice:uploadDone')
+
+-- HTTP upload: the recording goes to the server over its HTTP port instead of a game network event.
+proxy('sd-phone:voice:httpSlot', 'sd-phone:server:voice:httpSlot', nil, uploadUrl)

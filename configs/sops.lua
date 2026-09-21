@@ -1,8 +1,10 @@
 -- Standing orders - the SOPs a department publishes to its own terminal.
 --
--- A STATIC config, like the penal code. These are policy documents, not records: they are written
--- once by whoever runs the department and read by everyone else, so there is nothing to store and
--- nothing to sync. Edit this file and restart to publish.
+-- The set every department STARTS from. These are policy documents, not records. Edit this file
+-- and restart to publish to everyone, or let a department retune its own copy from the terminal:
+-- anyone holding sops.manage (configs/mdt.lua) can rewrite, add or hide an order, and that change
+-- is stored in phone_mdt_sop_overrides for THEIR department only. Resetting an order in the
+-- terminal drops it back to what this file says.
 --
 --   code      the reference the SOP is cited by on a report; must be unique
 --   title     what the order is called

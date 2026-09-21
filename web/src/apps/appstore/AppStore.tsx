@@ -8,6 +8,7 @@ import { useHasData } from '@/stores/serviceStore';
 import { useWifiConnected, useWifiNetworks } from '@/stores/wifiStore';
 import { AlertDialog } from '@/ui/AlertDialog';
 import { AppIconSVG } from '@/shell/AppIconSVG';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { SearchBar } from '@/ui/SearchBar';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { CircularProgress } from '@/ui/CircularProgress';
@@ -115,6 +116,7 @@ export function AppStore({ onClose: _onClose, apps, installed, onInstall, onOpen
     const [q, setQ] = useSessionState('appstore:search', '');
     const [filter, setFilter] = useSessionState<'all' | 'notInstalled'>('appstore:filter', 'all');
     const [selectedId, setSelectedId] = useSessionState<string | null>('appstore:selected', null);
+    useDeeplinkTarget('appstore', target => setSelectedId(String(target.appId)));
     const selectedProgress = useDownloadProgress(selectedId ?? '');
     const selected = apps.find(a => a.id === selectedId) ?? null;
     const query = q.trim().toLowerCase();

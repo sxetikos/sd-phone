@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { apiData } from '@/core/api';
 import { fetchNui, isFiveM } from '@/core/nui';
@@ -16,6 +16,7 @@ import { useContactActions } from '@/apps/_classifieds/useContactActions';
 import { PagesTabBar, type PagesTab } from './PagesTabBar';
 import { SchedulePickerSheet } from '@/shared/SchedulePickerSheet';
 import { StatusBarSpacer } from '@/ui/StatusBarSpacer';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 export function Pages({ onClose: _onClose }: { onClose: () => void }) {
     const [tab,      setTab]      = useSessionState<PagesTab>('pages:tab', 'browse');
@@ -29,6 +30,21 @@ export function Pages({ onClose: _onClose }: { onClose: () => void }) {
         rid => { setOpenId(cur => (cur === rid ? null : cur)); setEditing(cur => (cur?.id === rid ? null : cur)); },
     );
     const open = posts.find(p => p.id === openId) ?? null;
+
+    const [pendingPostId, setPendingPostId] = useState<string | null>(null);
+    useDeeplinkTarget('pages', target => {
+        setCreating(false);
+        setEditing(null);
+        setTab('browse');
+        setPendingPostId(String(target.postId));
+    });
+    useEffect(() => {
+        if (!pendingPostId) return;
+        const post = posts.find(p => String(p.id) === pendingPostId);
+        if (!post) return;
+        setOpenId(post.id);
+        setPendingPostId(null);
+    }, [pendingPostId, posts, setOpenId]);
     const contact = useContactActions();
 
     const animateNav = useDidEnter();

@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { FolderOpen, Link2, Send, Trash2, UserPlus, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { FolderOpen, History, Link2, Send, Share2, Trash2, UserPlus, X } from 'lucide-react';
 
 import { device } from '@device';
 import { t } from '@/i18n';
 import { colorFor } from '@/lib/format';
 import { formatListDate, formatMediumDate } from '@/lib/time';
 import { useAsyncData } from '@/hooks/useAsyncData';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { InitialsAvatar } from '@/shared/ContactAvatar';
 import { AlertDialog } from '@/ui/AlertDialog';
 import { EmptyState } from '@/ui/EmptyState';
@@ -14,10 +15,14 @@ import { Scroller } from '@/ui/Scroller';
 import { Select } from '@/ui/Select';
 
 import type { CaseDetail, CasePriority, CaseRole, CaseStatus, EvidenceItem } from './data';
+import { FieldLock, LivePresence, SharedAccessPill } from './LivePresence';
 import {
-    mdtCase, mdtCaseAssign, mdtCaseLinkReport, mdtCaseNote, mdtDeleteCase, mdtSaveCase,
+    mdtCase, mdtCaseAssign, mdtCaseLinkReport, mdtCaseNote, mdtDeleteCase, mdtPatchCase, mdtSaveCase,
 } from './mdtApi';
 import { PersonPicker } from './PersonPicker';
+import { RecordHistorySheet } from './RecordHistorySheet';
+import { RecordShareSheet } from './RecordShareSheet';
+import { useLiveRecord } from './useLiveRecord';
 import { ReportLinker, reportTypeLabel, reportTypeTone } from './ReportEditor';
 import { useMdtSession } from './useMdtSession';
 import { mdtFieldArea, mdtPanePad, mdtRef, mdtRowMeta, mdtRowTitle, mdtSectionHeader, STATUS_TONE } from './mdtTheme';
@@ -70,11 +75,17 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
     const { open } = useMdtSession();
 
     const [file, setFile] = useState<CaseDetail | null>(null);
-    const { loading } = useAsyncData(
+    const { loading, refetch } = useAsyncData(
         () => (caseRef ? mdtCase(caseRef) : Promise.resolve(null)),
         [caseRef],
         { onData: setFile },
     );
+    const live = useLiveRecord('case', caseRef);
+    const summaryText = live.text('summary');
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'case' && share.ref === caseRef) refetch(); });
+    const summaryEditing = useRef(false);
+    const [sharing, setSharing] = useState(false);
+    const [history, setHistory] = useState(false);
 
     const [draft, setDraft] = useState<NewCase | null>(() => (
         caseRef === null ? { title: '', summary: '', evidence: [], status: 'open', priority: 'medium' } : null
@@ -87,8 +98,13 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
     const [error, setError] = useState('');
     const [saving, setSaving] = useState(false);
 
-    useEffect(() => { setSummary(file?.summary ?? ''); }, [file]);
+    useEffect(() => {
+        if (!summaryEditing.current) setSummary(file?.summary ?? '');
+    }, [file]);
     useEffect(() => { setError(''); }, [caseRef]);
+    useEffect(() => {
+        if (live.savedAt > 0) refetch();
+    }, [live.savedAt, refetch]);
 
     async function create() {
         if (!draft || saving) return;
@@ -110,22 +126,54 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
     async function patch(part: Partial<NewCase>) {
         if (!file || saving) return;
         setSaving(true);
-        const next = await mdtSaveCase({
+        const res = await mdtPatchCase({
             ref:      file.ref,
             title:    part.title ?? file.title,
             summary:  part.summary ?? file.summary,
             evidence: part.evidence ?? file.evidence ?? [],
             status:   part.status ?? file.status,
             priority: part.priority ?? file.priority,
+            fields:   Object.keys(part),
         });
         setSaving(false);
-        if (!next) {
-            setError(t('mdt.saveFailed', 'That could not be saved.'));
+        if (!res.value) {
+            setError(res.error ?? t('mdt.saveFailed', 'That could not be saved.'));
             return;
         }
-        setFile(next);
+        if (part.summary !== undefined) {
+            summaryEditing.current = false;
+            live.release('summary');
+        }
+        setFile(res.value);
+        setSummary(res.value.summary);
         setError('');
         onChanged();
+    }
+
+    function typeSummary(value: string) {
+        if (summaryText) {
+            if (value !== summaryText.value) summaryText.change(value);
+            return;
+        }
+        setSummary(value);
+        summaryEditing.current = true;
+        live.send('summary', value);
+        void live.claim('summary').then(failed => {
+            if (!failed) return;
+            summaryEditing.current = false;
+            setError(failed);
+            setSummary(file?.summary ?? '');
+        });
+    }
+
+    function discardSummary() {
+        if (summaryText) {
+            if (live.viewers.length <= 1 && file && summaryText.value !== file.summary) summaryText.change(file.summary);
+            return;
+        }
+        summaryEditing.current = false;
+        live.release('summary');
+        setSummary(file?.summary ?? '');
     }
 
     async function apply(run: Promise<CaseDetail | null>) {
@@ -198,6 +246,21 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
         );
     }
 
+    if (caseRef && live.gone) {
+        return (
+            <EmptyState
+                center
+                icon={FolderOpen}
+                title={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawn', 'Access withdrawn')
+                    : t('mdt.caseGone', 'Case unavailable')}
+                subtitle={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawnSub', 'The department that owns this took it back while you had it open.')
+                    : t('mdt.caseGoneSub', 'It was closed out and removed from the file room.')}
+            />
+        );
+    }
+
     if (!file) {
         if (loading) {
             return (
@@ -219,13 +282,18 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
     }
 
     const editable = file.canEdit;
+    const manage = file.canManage ?? file.canEdit;
+    const summaryLock = live.heldBy('summary');
 
     return (
         <>
             <Scroller className={`h-full ${mdtPanePad}`}>
                 <div className="flex flex-wrap items-start gap-3">
                     <div className="min-w-0 flex-1">
-                        <span dir="ltr" className={mdtRef}>{file.ref}</span>
+                        <span className="flex items-center gap-2">
+                            <span dir="ltr" className={mdtRef}>{file.ref}</span>
+                            <SharedAccessPill access={file.sharedAccess} />
+                        </span>
                         <h1 className="mt-1 text-[26px] font-bold leading-tight tracking-ios-display text-black dark:text-white">
                             {file.title}
                         </h1>
@@ -235,7 +303,25 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                                 date: formatMediumDate(file.createdAt),
                             })}
                         </div>
+                        <LivePresence live={live} />
                     </div>
+                    <MdtButton
+                        size="sm"
+                        variant="text"
+                        icon={<History className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                        onClick={() => setHistory(true)}
+                    >
+                        {t('mdt.history', 'History')}
+                    </MdtButton>
+                    {file.canShare && (
+                        <MdtButton
+                            size="sm"
+                            icon={<Share2 className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                            onClick={() => setSharing(true)}
+                        >
+                            {t('mdt.share', 'Share')}
+                        </MdtButton>
+                    )}
                     {file.canDelete && (
                         <MdtButton
                             variant="destructive"
@@ -249,7 +335,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                 </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                    {editable ? (
+                    {manage ? (
                         <>
                             <Select<CaseStatus>
                                 value={file.status}
@@ -277,31 +363,35 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                     </span>
                 </div>
 
-                <div className={`mb-2 mt-5 px-1 ${mdtSectionHeader}`}>{t('mdt.summary', 'Summary')}</div>
+                <div className="mb-2 mt-5 flex items-center gap-2 px-1">
+                    <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.summary', 'Summary')}</span>
+                    <FieldLock holder={summaryLock} />
+                </div>
                 <MdtCard className="p-4">
-                    {editable ? (
+                    {editable && !summaryLock ? (
                         <>
                             <MdtRichField
                                 rows={5}
-                                value={summary}
-                                onChange={setSummary}
+                                value={summaryText ? summaryText.value : summary}
+                                onChange={typeSummary}
                                 maxLength={4000}
                                 placeholder={t('mdt.caseSummaryHint', 'What ties these incidents together.')}
+                                collab={summaryText ? { carets: summaryText.carets, flashes: summaryText.flashes, onSelect: summaryText.select } : undefined}
                             />
-                            {summary !== file.summary && (
+                            {(summaryText ? summaryText.value : summary) !== file.summary && (
                                 <div className="mt-3 flex items-center gap-3">
-                                    <MdtButton size="sm" variant="filled" disabled={saving} onClick={() => void patch({ summary })}>
+                                    <MdtButton size="sm" variant="filled" disabled={saving} onClick={() => void patch({ summary: summaryText ? summaryText.value : summary })}>
                                         {t('common.save', 'Save')}
                                     </MdtButton>
-                                    <MdtButton size="sm" variant="text" onClick={() => setSummary(file.summary)}>
+                                    <MdtButton size="sm" variant="text" onClick={discardSummary}>
                                         {t('common.cancel', 'Cancel')}
                                     </MdtButton>
                                 </div>
                             )}
                         </>
-                    ) : file.summary ? (
+                    ) : (summaryText ? summaryText.value : live.liveValue('summary', file.summary)) ? (
                         <MdtRichText
-                            text={file.summary}
+                            text={summaryText ? summaryText.value : live.liveValue('summary', file.summary)}
                             className="text-[15px] leading-relaxed text-black dark:text-white"
                         />
                     ) : (
@@ -324,7 +414,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                             <span className={`flex-1 ${mdtSectionHeader}`}>
                                 {t('mdt.assignedOfficers', 'Assigned officers')}
                             </span>
-                            {editable && (
+                            {manage && (
                                 <MdtButton
                                     size="sm"
                                     variant="text"
@@ -355,7 +445,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
 
                                 const controls = (
                                     <>
-                                        {editable ? (
+                                        {manage ? (
                                             <Select<CaseRole>
                                                 value={officer.role}
                                                 onChange={role => void apply(mdtCaseAssign(
@@ -368,7 +458,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                                         ) : (
                                             <Pill tone={STATUS_TONE[officer.role] ?? 'blue'}>{caseRoleLabel(officer.role)}</Pill>
                                         )}
-                                        {editable && (
+                                        {manage && (
                                             <button
                                                 type="button"
                                                 onClick={() => void apply(mdtCaseAssign(
@@ -408,7 +498,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                             <span className={`flex-1 ${mdtSectionHeader}`}>
                                 {t('mdt.linkedReports', 'Linked reports')}
                             </span>
-                            {editable && (
+                            {manage && (
                                 <MdtButton
                                     size="sm"
                                     variant="text"
@@ -435,7 +525,7 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                                         <span className={`min-w-0 flex-1 truncate ${mdtRowTitle}`}>{report.title}</span>
                                         <Pill tone={reportTypeTone(report.type)}>{reportTypeLabel(report.type)}</Pill>
                                     </button>
-                                    {editable && (
+                                    {manage && (
                                         <button
                                             type="button"
                                             onClick={() => void apply(mdtCaseLinkReport(file.ref, report.ref, false))}
@@ -523,6 +613,19 @@ export function CaseFile({ caseRef, onSaved, onDeleted, onClose, onChanged }: {
                         setLinking(false);
                         void apply(mdtCaseLinkReport(file.ref, ref, true));
                     }}
+                />
+            )}
+
+            {sharing && (
+                <RecordShareSheet kind="case" recordRef={file.ref} onClose={() => setSharing(false)} />
+            )}
+
+            {history && (
+                <RecordHistorySheet
+                    kind="case"
+                    recordRef={file.ref}
+                    onClose={() => setHistory(false)}
+                    onRestored={refetch}
                 />
             )}
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { apiData } from '@/core/api';
 import { fetchNui, isFiveM } from '@/core/nui';
@@ -16,6 +16,7 @@ import { useContactActions } from '@/apps/_classifieds/useContactActions';
 import { MarketplaceTabBar, type MarketTab } from './MarketplaceTabBar';
 import { SchedulePickerSheet } from '@/shared/SchedulePickerSheet';
 import { StatusBarSpacer } from '@/ui/StatusBarSpacer';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 export function Marketplace({ onClose: _onClose }: { onClose: () => void }) {
     const [tab,      setTab]      = useSessionState<MarketTab>('marketplace:tab', 'home');
@@ -29,6 +30,21 @@ export function Marketplace({ onClose: _onClose }: { onClose: () => void }) {
         rid => { setOpenId(cur => (cur === rid ? null : cur)); setEditing(cur => (cur?.id === rid ? null : cur)); },
     );
     const open = listings.find(l => l.id === openId) ?? null;
+
+    const [pendingListingId, setPendingListingId] = useState<string | null>(null);
+    useDeeplinkTarget('marketplace', target => {
+        setCreating(false);
+        setEditing(null);
+        setTab('home');
+        setPendingListingId(String(target.listingId));
+    });
+    useEffect(() => {
+        if (!pendingListingId) return;
+        const listing = listings.find(l => String(l.id) === pendingListingId);
+        if (!listing) return;
+        setOpenId(listing.id);
+        setPendingListingId(null);
+    }, [pendingListingId, listings, setOpenId]);
     const contact = useContactActions();
 
     const animateNav = useDidEnter();

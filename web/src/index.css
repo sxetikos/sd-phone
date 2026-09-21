@@ -186,6 +186,7 @@ html, body, #root {
                 stroke           0.3s ease !important;
 }
 @keyframes admin-toast { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes spotlight-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .animate-admin-toast { animation: admin-toast 0.22s ease; }
 /* Admin panel scroll areas: slim rounded thumb on a transparent track, matching the dark theme. */
 .admin-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -232,6 +233,11 @@ html, body, #root {
 
 .sd-fold-rig [style*="backdrop-filter"],
 .sd-fold-rig .sd-frosted {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+}
+
+[data-game-view-overlay] * {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
 }
@@ -406,6 +412,8 @@ html, body, #root {
     88% { transform: translateX(-3px); }
 }
 .animate-pin-shake { animation: pin-shake 0.5s ease; }
+@keyframes mdt-live-flash { 0% { opacity: 0.38; } 60% { opacity: 0.3; } 100% { opacity: 0; } }
+.mdt-live-flash           { animation: mdt-live-flash 4s ease-out forwards; }
 @keyframes faceid-dim-in  { from { opacity: 0; } to { opacity: 1; } }
 .animate-faceid-dim-in    { animation: faceid-dim-in 0.24s ease forwards; }
 .faceid-frost             { -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px); }

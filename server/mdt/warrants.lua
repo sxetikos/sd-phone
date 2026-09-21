@@ -10,6 +10,12 @@ local access    = require 'server.mdt.access'
 local offences  = require 'server.mdt.offences'
 ---@type table Reports and cases (server.mdt.paperwork): the suspect-charge lookup a warrant reads.
 local paperwork = require 'server.mdt.paperwork'
+---@type table Live records (server.mdt.live): field locks, the saved push and the access registry.
+local live      = require 'server.mdt.live'
+---@type table Court shares (server.mdt.shares): whether a court department may edit a warrant.
+local shares    = require 'server.mdt.shares'
+---@type table Revision history (server.mdt.revisions): the field-by-field trail of amendments.
+local revisions = require 'server.mdt.revisions'
 
 ---@type table Warrants module; the table returned at end of file. A warrant is active while its
 ---expiry is in the future, and closing one expires it rather than deleting it.
@@ -41,6 +47,12 @@ local MAX_CHARGES = math.floor(tonumber((MDT.Limits or {}).Charges) or 40)
 
 ---@type integer Seconds in a day.
 local DAY = 86400
+
+---@type integer Longest note a warrant carries, in bytes.
+local MAX_NOTES = 2000
+
+---@type table<string, boolean> Warrant fields an edit may write.
+local WARRANT_FIELDS <const> = { charges = true, bond = true, expiry = true, notes = true }
 
 ---@type string Client event every open terminal repaints its wanted flags from.
 local WANTED_EVENT = 'sd-phone:client:mdt:warrant'
@@ -102,7 +114,57 @@ local function shapeOf(row, now)
         issuedAt       = tonumber(row.issued_at) or 0,
         expiresAt      = expiry,
         active         = expiry > now,
+        notes          = row.notes or '',
     }
+end
+
+---Encodes charge lines in a fixed key order, so equal charges always encode equal.
+---@param charges table[] { code, count }
+---@return string json
+local function encodeCharges(charges)
+    local parts = {}
+    for i = 1, #charges do
+        parts[i] = ('{"code":%s,"count":%d}'):format(json.encode(charges[i].code), math.floor(tonumber(charges[i].count) or 1))
+    end
+    return '[' .. table.concat(parts, ',') .. ']'
+end
+
+---Resolves a caller's access to one warrant. Every terminal with warrants.view reads them; a court
+---edits through an editable share, the issuing department through warrants.issue, and only while active.
+---@param src integer
+---@param me table
+---@param ref string
+---@return LiveAccess|nil
+local function warrantAccess(src, me, ref)
+    if not access.can(src, 'warrants.view') then return nil end
+    local row = MySQL.single.await('SELECT * FROM phone_mdt_warrants WHERE ref = ? LIMIT 1', { ref })
+    if not row then return nil end
+    local active = (tonumber(row.expiry) or 0) > os.time()
+    if access.isCourt(me) then
+        local level = shares.accessFor(me, 'warrant', ref)
+        local edit = active and level == 'edit' and access.can(src, 'shared.edit')
+        return { row = row, view = true, edit = edit, owner = false, restore = false, fields = edit and WARRANT_FIELDS or {}, access = level }
+    end
+    local mine = row.department == '' or row.department == me.job
+    local edit = active and mine and access.can(src, 'warrants.issue')
+    return {
+        row = row, view = true, edit = edit, owner = mine and access.domain(me) == 'leo',
+        restore = edit, fields = edit and WARRANT_FIELDS or {},
+    }
+end
+
+---The warrant payload with what the caller may do to it.
+---@param src integer
+---@param me table
+---@param row table
+---@return table warrant
+local function detailFor(src, me, row)
+    local shape = shapeOf(row, os.time())
+    local res = warrantAccess(src, me, row.ref)
+    shape.canEdit      = res ~= nil and res.edit or false
+    shape.canShare     = res ~= nil and res.owner and access.can(src, 'shares.create') or false
+    shape.sharedAccess = res and res.access or nil
+    return shape
 end
 
 ---Whether a citizen currently has an unexpired warrant against them.
@@ -176,7 +238,7 @@ function warrants.exportWarrant(ref, domain)
 end
 
 ---A page of warrants, split into the active ones and the ones that have run out.
-warrants.list = access.gated('warrants.view', function(_, payload)
+warrants.list = access.gated('warrants.view', function(_, payload, me)
     local now = os.time()
     local where, params = { 'w.expiry > ?' }, { now }
     if payload.status == 'expired' then
@@ -202,15 +264,21 @@ warrants.list = access.gated('warrants.view', function(_, payload)
 
     local out = {}
     for i = 1, #rows do out[i] = shapeOf(rows[i], now) end
+    if access.isCourt(me) then
+        local refs = {}
+        for i = 1, #out do refs[i] = out[i].ref end
+        local levels = shares.levelsFor(me, 'warrant', refs)
+        for i = 1, #out do out[i].sharedAccess = levels[out[i].ref] end
+    end
     return util.ok({ rows = out, total = total, page = page, pageSize = PAGE_SIZE })
 end)
 
 ---One warrant in full.
-warrants.get = access.gated('warrants.view', function(_, payload)
+warrants.get = access.gated('warrants.view', function(src, payload, me)
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and MySQL.single.await('SELECT * FROM phone_mdt_warrants WHERE ref = ? LIMIT 1', { ref })
     if not row then return util.fail('mdt.warrantNoLongerExists', 'That warrant no longer exists') end
-    return util.ok({ warrant = shapeOf(row, os.time()) })
+    return util.ok({ warrant = detailFor(src, me, row) })
 end)
 
 ---Issues a warrant. When a report is attached the charges come from that report's own rows for
@@ -291,6 +359,171 @@ warrants.issue = access.audited('warrants.issue', function(_, payload, me)
         details    = { subject = subject or citizenid, citizenid = citizenid, reportRef = reportRef, days = days },
     }
 end)
+
+---Amends a live warrant: only the fields named in `payload.fields` (every field when absent), refused
+---while someone else holds one of them, with a revision per changed field.
+---@param src integer
+---@param payload table
+---@param me table
+---@return table envelope, table? audit
+local function updateWarrant(src, payload, me)
+    local ref = util.limitedString(payload.ref, 16)
+    local res = ref and warrantAccess(src, me, ref)
+    if not ref or not res or not res.edit then
+        return util.fail('mdt.warrantNotEditable', 'That warrant can no longer be edited')
+    end
+    local row = res.row
+
+    local fields = {}
+    if type(payload.fields) == 'table' then
+        for i = 1, #payload.fields do
+            local field = payload.fields[i]
+            if type(field) == 'string' and res.fields[field] then fields[field] = true end
+        end
+    else
+        for field in pairs(res.fields) do fields[field] = true end
+    end
+
+    for field in pairs(fields) do
+        local holder = live.lockedByOther('warrant', ref, field, src)
+        if holder then return util.fail('mdt.fieldBeingEdited', '{name} is editing that', { name = holder }) end
+    end
+
+    local now = os.time()
+    local sets, values, changed = {}, {}, {}
+
+    if fields.charges then
+        local raw = {}
+        if type(payload.charges) == 'table' then
+            for i = 1, #payload.charges do
+                local c = payload.charges[i]
+                if type(c) == 'table' and #raw < MAX_CHARGES then raw[#raw + 1] = { code = c.code, count = c.count } end
+            end
+        end
+        local lines = offences.totalFor(raw)
+        if #lines == 0 then return util.fail('mdt.warrantNeedsLeastOneCharge', 'A warrant needs at least one charge') end
+
+        local charges = {}
+        for i = 1, #lines do
+            charges[i] = {
+                code = lines[i].code, label = lines[i].label, class = lines[i].class,
+                count = lines[i].count, months = lines[i].months, fine = lines[i].fine,
+            }
+        end
+        local before, after = encodeCharges(decodeCharges(row.charges)), encodeCharges(charges)
+        if before ~= after then
+            local felonies, misdemeanors, infractions = offences.countByClass(lines)
+            changed[#changed + 1] = { field = 'charges', before = before, after = after }
+            sets[#sets + 1] = 'charges = ?, felonies = ?, misdemeanors = ?, infractions = ?'
+            values[#values + 1] = json.encode(charges)
+            values[#values + 1] = felonies
+            values[#values + 1] = misdemeanors
+            values[#values + 1] = infractions
+        end
+    end
+
+    if fields.bond then
+        local bond = util.wholeAmount(payload.bond)
+        if bond > MAX_BOND then bond = MAX_BOND end
+        local before = tostring(tonumber(row.bond) or 0)
+        if before ~= tostring(bond) then
+            changed[#changed + 1] = { field = 'bond', before = before, after = tostring(bond) }
+            sets[#sets + 1] = 'bond = ?'
+            values[#values + 1] = bond
+        end
+    end
+
+    local expiryChanged = false
+    if fields.expiry then
+        local expiry = math.floor(tonumber(payload.expiresAt) or 0)
+        if not util.finite(expiry) or expiry < now + 60 then expiry = now + 60 end
+        if expiry > now + (MAX_DAYS * DAY) then expiry = now + (MAX_DAYS * DAY) end
+        local before = tostring(tonumber(row.expiry) or 0)
+        if before ~= tostring(expiry) then
+            expiryChanged = true
+            changed[#changed + 1] = { field = 'expiry', before = before, after = tostring(expiry) }
+            sets[#sets + 1] = 'expiry = ?'
+            values[#values + 1] = expiry
+        end
+    end
+
+    if fields.notes then
+        local notes = util.limitedString(payload.notes, MAX_NOTES) or ''
+        local before = row.notes or ''
+        if before ~= notes then
+            changed[#changed + 1] = { field = 'notes', before = before, after = notes }
+            sets[#sets + 1] = 'notes = ?'
+            values[#values + 1] = notes
+        end
+    end
+
+    if #sets > 0 then
+        values[#values + 1] = row.id
+        MySQL.update.await(('UPDATE phone_mdt_warrants SET %s WHERE id = ?'):format(table.concat(sets, ', ')), values)
+    end
+
+    for i = 1, #changed do
+        revisions.record(me, 'warrant', ref, changed[i].field, changed[i].before, changed[i].after)
+    end
+    local names = {}
+    for field in pairs(fields) do names[#names + 1] = field end
+    live.saved('warrant', ref, src, names, me.name)
+
+    if expiryChanged then announce(row.citizenid, warrants.isWanted(row.citizenid)) end
+
+    local saved = MySQL.single.await('SELECT * FROM phone_mdt_warrants WHERE id = ? LIMIT 1', { row.id })
+    if not saved then return util.fail('mdt.warrantNoLongerExists', 'That warrant no longer exists') end
+
+    local changedNames = {}
+    for i = 1, #changed do changedNames[i] = changed[i].field end
+    return util.ok({ warrant = detailFor(src, me, saved) }), {
+        entityType = 'warrant',
+        entityId   = ref,
+        details    = { subject = row.subject_name, citizenid = row.citizenid, fields = changedNames },
+    }
+end
+
+---Amends a warrant under the key the caller's terminal edits with.
+---@param src integer
+---@param payload table
+---@return table envelope
+function warrants.update(src, payload)
+    local me = access.identity(src)
+    if not me then return util.fail('mdt.doNotHaveAccessTerminal', 'You do not have access to this terminal') end
+    return access.audited(access.isCourt(me) and 'shared.edit' or 'warrants.issue', updateWarrant)(src, payload)
+end
+
+---Puts one warrant field back to an earlier value through the ordinary amend path.
+---@param src integer
+---@param me table
+---@param ref string
+---@param field string
+---@param value string
+---@return table envelope
+local function restoreWarrant(src, me, ref, field, value)
+    local res = warrantAccess(src, me, ref)
+    if not res or not res.restore then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
+
+    local row = res.row
+    local payload = {
+        ref       = ref,
+        fields    = { field },
+        charges   = decodeCharges(row.charges),
+        bond      = tonumber(row.bond) or 0,
+        expiresAt = tonumber(row.expiry) or 0,
+        notes     = row.notes or '',
+    }
+    if field == 'charges' then
+        payload.charges = decodeCharges(value)
+    elseif field == 'bond' or field == 'expiry' then
+        payload[field == 'bond' and 'bond' or 'expiresAt'] = tonumber(value) or 0
+    else
+        payload.notes = value
+    end
+    return (updateWarrant(src, payload, me))
+end
+
+live.register('warrant', { resolve = warrantAccess, restore = restoreWarrant })
 
 ---Closes a warrant by expiring it. The row survives, so the subject's history stays intact. Only
 ---the department that issued a warrant may close it, however wide the read is.

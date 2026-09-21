@@ -5,6 +5,7 @@ import { t } from '@/i18n';
 import { fetchNui, isFiveM } from '@/core/nui';
 import { useStatusBarLight } from '@/shell/useStatusBarLight';
 import { useDeckActive } from '@/shell/deckActive';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { useRefreshOnReconnect } from '@/hooks/useRefreshOnReconnect';
 import { clearSessionState, useSessionState } from '@/hooks/useSessionState';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
@@ -73,6 +74,16 @@ export function Photogram({ onClose: _onClose }: { onClose: () => void }) {
     const [switching,  setSwitching]  = useState(false);
     const [adding,     setAdding]     = useState(false);
     const [liveEnabled, setLiveEnabled] = useState(!isFiveM);
+
+    useDeeplinkTarget('photogram', target => {
+        setDetail(null);
+        setFollows(null);
+        setCommentId(null);
+        setDmOpen(false);
+        setCreateOpen(false);
+        setEditing(false);
+        setViewHandle(String(target.handle));
+    });
 
     useEffect(() => {
         if (!isFiveM) return;

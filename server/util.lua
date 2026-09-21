@@ -95,6 +95,13 @@ function util.trim(s)
     return from > #s and '' or s:match('.*%S', from)
 end
 
+---Escapes LIKE wildcards so player text matches literally. Pair with `ESCAPE '\\'` in the query.
+---@param s string
+---@return string
+function util.escapeLike(s)
+    return (tostring(s):gsub('[%%_\\]', '\\%0'))
+end
+
 ---Two-letter uppercase initials from a display name (first letters of the first two words), for
 ---avatar fallbacks. Falls back to the first character, then '#'. Nil-safe.
 ---@param name any display name

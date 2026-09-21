@@ -14,6 +14,11 @@
 --   description  one line explaining what the charge covers, shown in the penal code browser
 --
 -- Order does not matter: the terminal groups by class and sorts by code.
+--
+-- This file is the catalogue every server STARTS from. Anyone holding offences.manage
+-- (configs/mdt.lua) can retune a charge, add one or hide one from the terminal itself, and
+-- those changes are stored in phone_mdt_penal_overrides and laid over this file. Resetting a
+-- charge in the terminal drops it back to the figures below, so editing this file still works.
 
 return {
     -- Felonies

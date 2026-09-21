@@ -5,6 +5,7 @@ import { device } from '@device';
 import { t } from '@/i18n';
 import { formatListDate } from '@/lib/time';
 import { useAsyncData } from '@/hooks/useAsyncData';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { EmptyState } from '@/ui/EmptyState';
 import { ListColumn } from '@/ui/ListColumn';
@@ -15,6 +16,7 @@ import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Select } from '@/ui/Select';
 
 import type { ReportSummary, ReportType } from './data';
+import { SharedAccessPill } from './LivePresence';
 import { mdtReports } from './mdtApi';
 import { REPORT_TYPES, ReportEditor, reportTypeLabel, reportTypeTone } from './ReportEditor';
 import { useMdtSession } from './useMdtSession';
@@ -43,6 +45,7 @@ function ReportListRow({ report, selected, onPress }: {
             <span className="flex w-full items-center gap-2">
                 <span dir="ltr" className={`shrink-0 ${mdtRef}`}>{report.ref}</span>
                 <span className={`min-w-0 flex-1 truncate ${mdtRowTitle}`}>{report.title}</span>
+                <SharedAccessPill access={report.sharedAccess} />
                 <Pill tone={reportTypeTone(report.type)}>{reportTypeLabel(report.type)}</Pill>
             </span>
             <span className={`flex w-full items-center gap-2 ${mdtRowMeta}`}>
@@ -63,7 +66,8 @@ function ReportListRow({ report, selected, onPress }: {
 }
 
 export function ReportsPane() {
-    const { can, selected, select } = useMdtSession();
+    const { can, selected, select, department } = useMdtSession();
+    const court = department?.type === 'doj';
 
     const [filter, setFilter] = useSessionState<TypeFilter>('mdt:reports:type', 'All');
     const [query, setQuery] = useSessionState('mdt:reports:query', '');
@@ -81,6 +85,7 @@ export function ReportsPane() {
         () => mdtReports({ query: term, type: filter, page }),
         [term, filter, page],
     );
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'report') refetch(); });
 
     const rows = data?.rows ?? [];
     const total = data?.total ?? 0;
@@ -95,12 +100,16 @@ export function ReportsPane() {
         <EmptyState
             center
             icon={FileText}
-            title={term ? t('mdt.noMatchingReports', 'No matching reports') : t('mdt.noReports', 'No reports filed')}
+            title={term
+                ? t('mdt.noMatchingReports', 'No matching reports')
+                : court ? t('mdt.noSharedReports', 'Nothing shared yet') : t('mdt.noReports', 'No reports filed')}
             subtitle={loading
                 ? undefined
                 : term
                     ? t('mdt.noMatchingReportsSub', 'Nothing matches that title or reference.')
-                    : t('mdt.noReportsSub', 'Paperwork your department files shows up here.')}
+                    : court
+                        ? t('mdt.noSharedReportsSub', 'Reports police share with your department show up here.')
+                        : t('mdt.noReportsSub', 'Paperwork your department files shows up here.')}
         />
     );
 

@@ -11,6 +11,7 @@ import { fetchNui, isFiveM } from '@/core/nui';
 import { failText, type Envelope } from '@/core/api';
 import { useAsyncData } from '@/hooks/useAsyncData';
 import { useDeckActive } from '@/shell/deckActive';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { useIosPush } from '@/hooks/useIosPush';
 import { useSessionState } from '@/hooks/useSessionState';
 import { VEHICLES, type ValetInfo, type Vehicle, type VehicleStatus } from './data';
@@ -75,6 +76,19 @@ export function Garages({ onClose: _onClose }: { onClose: () => void }) {
 
     const [query, setQuery] = useSessionState('garages:search', '');
 
+    const [pendingVehicleId, setPendingVehicleId] = useState<string | null>(null);
+    useDeeplinkTarget('garages', target => {
+        setQuery('');
+        setPendingVehicleId(String(target.vehicleId));
+    });
+    useEffect(() => {
+        if (!pendingVehicleId) return;
+        const veh = (list?.vehicles ?? (isFiveM ? [] : VEHICLES)).find(v => String(v.id) === pendingVehicleId);
+        if (!veh) return;
+        setOpenId(veh.id);
+        setPendingVehicleId(null);
+    }, [pendingVehicleId, list, setOpenId]);
+
     const stored = vehicles.filter(v => v.status === 'stored').length;
     const impound = vehicles.filter(v => v.status === 'impound').length;
     const open = vehicles.find(v => v.id === openId) ?? null;
@@ -126,6 +140,7 @@ export function Garages({ onClose: _onClose }: { onClose: () => void }) {
 
             {open && (
                 <VehicleDetail
+                    key={open.id}
                     v={open}
                     showImages={showImages}
                     customImages={imgCfg.custom}

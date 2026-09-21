@@ -17,6 +17,7 @@ import {
 } from './voiceApi';
 import { t } from '@/i18n';
 import { StatusBarSpacer } from '@/ui/StatusBarSpacer';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 function recorderMessage(code: RecorderError): string {
     if (code === 'unavailable') return t('voicememos.micUnavailable', 'Microphone unavailable on this server.');
@@ -46,6 +47,19 @@ export function VoiceMemos({ onClose: _onClose }: { onClose: () => void }) {
     }, [recError]);
 
     useEffect(() => { void fetchMemos().then(setMemos); }, []);
+
+    const [pendingMemoId, setPendingMemoId] = useState<string | null>(null);
+    useDeeplinkTarget('voicememos', target => {
+        setQuery('');
+        setPendingMemoId(String(target.memoId));
+    });
+    useEffect(() => {
+        if (!pendingMemoId) return;
+        const memo = memos.find(m => String(m.id) === pendingMemoId);
+        if (!memo) return;
+        setExpanded(memo.id);
+        setPendingMemoId(null);
+    }, [pendingMemoId, memos, setExpanded]);
 
     useNuiEvent('sd-phone:voice:added', useCallback((memo: VoiceMemo) => {
         setMemos(prev => (prev.some(m => m.id === memo.id) ? prev : [memo, ...prev]));

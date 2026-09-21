@@ -105,8 +105,14 @@ function bundledCatalog(code: string): Promise<Record<string, unknown> | null> {
     return loader().then(m => m.default as Record<string, unknown>).catch(() => null);
 }
 
-export function setLocale(lang: string): Promise<void> {
-    const known = Boolean(catalogs[lang] || loaders[lang] || runtimeCodes.has(lang));
+function isKnownLocale(code: string): boolean {
+    return Boolean(catalogs[code] || loaders[code] || runtimeCodes.has(code));
+}
+
+export function setLocale(requested: string): Promise<void> {
+    const base = requested.split(/[-_]/)[0].toLowerCase();
+    const lang = !isKnownLocale(requested) && isKnownLocale(base) ? base : requested;
+    const known = isKnownLocale(lang);
     const code = known ? lang : 'en';
     currentCode = code;
     applyDocumentLocale(code);

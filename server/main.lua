@@ -70,6 +70,7 @@ require 'server.devseed.init'
 pcall(require, 'server.devswap')
 require 'server.notifications.init'
 require 'server.notes.init'
+require 'server.search.init'
 require 'server.calendar.init'
 require 'server.documents.init'
 require 'server.homes.init'

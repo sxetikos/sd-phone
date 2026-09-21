@@ -46,6 +46,7 @@ lib.callback.register('sd-phone:server:accounts:suggestCode',  function(src, pay
 lib.callback.register('sd-phone:server:accounts:myNumber',     function(src)          return actions.myNumber(src) end)
 lib.callback.register('sd-phone:server:accounts:myEmail',      function(src)          return actions.myEmail(src) end)
 lib.callback.register('sd-phone:server:accounts:savePassword',   function(src, payload) return actions.savePassword(src, payload) end)
+lib.callback.register('sd-phone:server:accounts:saveCustomPassword', function(src, payload) return actions.saveCustomPassword(src, payload) end)
 lib.callback.register('sd-phone:server:accounts:listPasswords',  function(src)          return actions.listPasswords(src) end)
 lib.callback.register('sd-phone:server:accounts:deletePassword', function(src, payload) return actions.deletePassword(src, payload) end)
 

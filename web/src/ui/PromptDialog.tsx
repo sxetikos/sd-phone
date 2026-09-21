@@ -28,6 +28,7 @@ interface Props {
     secure?:         boolean;
     sanitize?:       (v: string) => string;
     secondField?:  FieldConfig;
+    allowEmpty?:   boolean;
     confirmLabel?: string;
     cancelLabel?:  string;
     validate?:     (v1: string, v2?: string) => string | null;
@@ -41,7 +42,7 @@ function isThenable(r: ConfirmResult | Promise<ConfirmResult>): r is Promise<Con
 
 export function PromptDialog({
     title, message, label, placeholder, initialValue = '', maxLength, inputMode, secure, sanitize,
-    secondField, confirmLabel = t('common.ok', 'OK'), cancelLabel = t('common.cancel', 'Cancel'),
+    secondField, allowEmpty = false, confirmLabel = t('common.ok', 'OK'), cancelLabel = t('common.cancel', 'Cancel'),
     validate, onCancel, onConfirm,
 }: Props) {
     const [v1, setV1]           = useState(initialValue);
@@ -53,7 +54,7 @@ export function PromptDialog({
     const input2Ref  = useRef<HTMLInputElement>(null);
     const exitingRef = useRef(false);
 
-    const canConfirm = v1.trim().length > 0 && (!secondField || v2.trim().length > 0);
+    const canConfirm = allowEmpty || (v1.trim().length > 0 && (!secondField || v2.trim().length > 0));
 
     useEffect(() => {
         const target = input1Ref.current;

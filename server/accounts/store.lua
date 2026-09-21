@@ -93,7 +93,7 @@ function store.ensureSchema()
         CREATE TABLE IF NOT EXISTS phone_passwords (
             id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
             citizenid  VARCHAR(64)  NOT NULL,
-            app        VARCHAR(24)  NOT NULL,
+            app        VARCHAR(80)  NOT NULL,
             username   VARCHAR(64)  NOT NULL,
             password   VARCHAR(255) NOT NULL,
             email      VARCHAR(120) NULL,
@@ -114,6 +114,9 @@ function store.ensureSchema()
     -- them has to be widened before either can be written.
     util.ensureColumnWidth('phone_app_accounts', 'password_hash', 'password_hash VARCHAR(255) NOT NULL', 255)
     util.ensureColumnWidth('phone_passwords', 'password', 'password VARCHAR(255) NOT NULL', 255)
+    -- A custom app's entry is keyed 'custom:<identifier>', which the 24 chars sized for the
+    -- built-in app ids cannot hold.
+    util.ensureColumnWidth('phone_passwords', 'app', 'app VARCHAR(80) NOT NULL', 80)
 
     -- An account is identified by its contacts alone, which cannot say who owns it: an account
     -- with only an email is unattributable, and an email need not be the holder's, so counting a
@@ -413,6 +416,18 @@ function store.saveVaultEntry(citizenid, app, username, password, email, phone)
         VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE password = VALUES(password), email = VALUES(email), phone = VALUES(phone)
     ]], { citizenid, app, username, sealSecret(password), email, phone })
+end
+
+---How many logins a character's vault holds for one app, not counting the one being saved over.
+---Read-only.
+---@param citizenid string framework per-character id
+---@param app string vault app key
+---@param username string the login about to be written
+---@return integer count
+function store.countVaultEntries(citizenid, app, username)
+    return MySQL.scalar.await(
+        'SELECT COUNT(*) FROM phone_passwords WHERE citizenid = ? AND app = ? AND username <> ?',
+        { citizenid, app, username }) or 0
 end
 
 ---Returns all of one character's vault entries, ordered app then username. `created` is a unix

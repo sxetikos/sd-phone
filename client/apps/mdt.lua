@@ -20,8 +20,11 @@ local ACTIONS = {
     'cameras:list', 'recordings:list', 'recordings:delete', 'recordings:share',
     'reports:list', 'reports:get', 'reports:save', 'reports:delete',
     'cases:list', 'cases:get', 'cases:save', 'cases:delete', 'cases:note', 'cases:assign', 'cases:linkReport',
-    'warrants:list', 'warrants:get', 'warrants:issue', 'warrants:close', 'warrants:void',
-    'offences:list',
+    'warrants:list', 'warrants:get', 'warrants:issue', 'warrants:close', 'warrants:void', 'warrants:update',
+    'shares:list', 'shares:create', 'shares:revoke',
+    'revisions:list', 'revisions:restore',
+    'live:join', 'live:leave', 'live:lock', 'live:unlock', 'live:draft', 'live:op', 'live:caret', 'live:sync',
+    'offences:list', 'offences:save', 'offences:remove', 'offences:reset',
     'jail:list', 'jail:quote', 'jail:book',
     'roster:list', 'roster:setCallsign', 'roster:setRadio', 'roster:setGrade', 'roster:dismiss', 'roster:page',
     'me:update',
@@ -32,7 +35,7 @@ local ACTIONS = {
     'phone:media', 'phone:notes', 'phone:note', 'phone:accounts',
     'patients:search', 'patients:get', 'patients:update',
     'protocols:list', 'protocols:save', 'protocols:delete',
-    'sops:list',
+    'sops:list', 'sops:save', 'sops:remove', 'sops:reset',
     'affairs:list', 'affairs:get', 'affairs:officer', 'affairs:file', 'affairs:update',
     'affairs:note', 'affairs:close',
     'court:list', 'court:get', 'court:citizen', 'court:file', 'court:manage', 'court:note', 'court:rule',
@@ -119,5 +122,27 @@ end)
 ---@param data table { citizenid, wanted }
 RegisterNetEvent('sd-phone:client:mdt:warrant', function(data)
     SendNUIMessage({ action = 'sd-phone:mdt:warrant', data = data })
+end)
+
+---Server -> React: presence, lock, draft and save changes on a record this terminal has open.
+---@param data table
+RegisterNetEvent('sd-phone:client:mdt:live', function(data)
+    SendNUIMessage({ action = 'sd-phone:mdt:live', data = data })
+end)
+
+---Server -> React: this department's standing orders were changed from a terminal.
+RegisterNetEvent('sd-phone:client:mdt:sops', function()
+    SendNUIMessage({ action = 'sd-phone:mdt:sops', data = {} })
+end)
+
+---Server -> React: the penal code was retuned from a terminal, so open ones read it again.
+RegisterNetEvent('sd-phone:client:mdt:offences', function()
+    SendNUIMessage({ action = 'sd-phone:mdt:offences', data = {} })
+end)
+
+---Server -> React: paperwork was shared with this court, had its access changed, or was taken back.
+---@param data table { type, ref, access? }
+RegisterNetEvent('sd-phone:client:mdt:shares', function(data)
+    SendNUIMessage({ action = 'sd-phone:mdt:shares', data = data })
 end)
 

@@ -210,7 +210,8 @@ end
 --   bcs_housing  export GetOwnedHomes / GetHome(.properties.entry) / LockHome / isLocked / Add|RemoveKeyHolder / GetKeyHolders
 --   tk_housing   export getPropertiesByIdentifier (list only - no coords/lock/keys public)
 --   RxHousing   export GetOwnedProperties / GetProperty / AddKeyholder / RemoveKeyholder / GetPropertyKeyholders
---   loaf_housing export GetPlayerHouses | DB `loaf_houses`.entrance (coords only; keys need an undocumented keyId)
+--   loaf_housing export GetPlayerHouses, else DB `loaf_properties` (owner, id = address, propertyid, rent)
+--       with `loaf_houses`.entrance for coords where present; keys need an undocumented keyId
 --   origen_housing exports getPlayerHouses(.entryCoords) / toggleDoor / getHouseDoor / addKeyHolder / removeKeyHolder
 ---@type table<string, fun(source: number, id: string): table[]> Per-system property-list adapters.
 local ADAPTERS = {}
@@ -463,8 +464,61 @@ ADAPTERS['RxHousing'] = function(_source, id)
     return out
 end
 
+---@type boolean Whether the missing-export notice has already been printed this session.
+local loafExportWarned = false
+---@type boolean|nil Whether `loaf_houses` exists, probed once on first use (nil = not asked yet).
+local loafHasHouses
+
+---loaf_housing ownership straight from `loaf_properties`, for builds that expose no list export.
+---The row carries no label or coords: `id` is the address the script shows in game (LG-9636),
+---`propertyid` points at the house definition, and a set `rent` marks a tenancy. `furniture` is
+---left unselected, it is the largest column and the list never reads it. Entrance coords come
+---from `loaf_houses` where that table exists; without it the home lists with no waypoint.
+---@param id string caller identifier
+---@return table[] homes
+local function loafFromDb(id)
+    local rows = dbQuery(
+        'SELECT `id`, `propertyid`, `rent` FROM `loaf_properties` WHERE `owner` = ?', { id }
+    )
+    if not rows or #rows == 0 then return {} end
+
+    local houses = {}
+    local ids = {}
+    for _, r in ipairs(rows) do
+        if r.propertyid ~= nil then ids[#ids + 1] = r.propertyid end
+    end
+    if loafHasHouses == nil then
+        local found = dbQuery([[
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_name = 'loaf_houses' LIMIT 1
+        ]], {})
+        loafHasHouses = found ~= nil and found[1] ~= nil
+    end
+    if loafHasHouses and #ids > 0 then
+        local defs = dbQuery('SELECT * FROM `loaf_houses` WHERE `id` IN (?)', { ids })
+        for _, h in ipairs(defs or {}) do houses[tostring(h.id)] = h end
+    end
+
+    local out = {}
+    for _, r in ipairs(rows) do
+        local def = houses[tostring(r.propertyid)] or {}
+        local rent = s(r.rent)
+        out[#out + 1] = home{
+            id      = r.id or r.propertyid,
+            address = s(r.id) or s(def.label) or s(def.name),
+            type    = s(def.type),
+            area    = s(def.zone) or s(def.region),
+            value   = def.price or def.value,
+            status  = (rent and rent ~= '0') and 'rented' or 'owned',
+            coords  = coordsFrom(def, 'entrance', 'coords', 'location', 'enter'),
+        }
+    end
+    return out
+end
+
 ---loaf_housing: export probe, tried with the server id then the identifier; entrance coords from
----the row JSON when present.
+---the row JSON when present. A build without the export, or one that answers with nothing, falls
+---back to the ownership table so an owned home still lists.
 ---@param source number caller server id
 ---@param id string caller identifier
 ---@return table[] homes
@@ -472,11 +526,17 @@ ADAPTERS['loaf_housing'] = function(source, id)
     local props
     local ok, res = pcall(function() return exports['loaf_housing']:GetPlayerHouses(source) end)
     if ok and type(res) == 'table' then props = res end
-    if not props then
+    if not props or next(props) == nil then
         local ok2, res2 = pcall(function() return exports['loaf_housing']:GetPlayerHouses(id) end)
         if ok2 and type(res2) == 'table' then props = res2 end
     end
-    if not props then return {} end
+    if not props or next(props) == nil then
+        if not ok and not loafExportWarned then
+            loafExportWarned = true
+            print('^3[sd-phone:housing]^0 loaf_housing has no GetPlayerHouses export, reading `loaf_properties` instead')
+        end
+        return loafFromDb(id)
+    end
     local out = {}
     for _, p in pairs(props) do
         out[#out + 1] = home{

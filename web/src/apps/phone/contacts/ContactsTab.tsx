@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, Plus } from 'lucide-react';
 
 import { ContactAvatar } from '@/shared/ContactAvatar';
@@ -16,12 +16,15 @@ import {
 } from '../data';
 import { initialsFor } from '@/lib/format';
 import { t } from '@/i18n';
+import { useContactsStore } from '@/stores/contactsStore';
 
-export function ContactsTab({ contacts, myNumber, myName, card, onRequestCall, onAddContact, onUpdateContact, onSaveCard, onDeleteContact, onToggleFavorite }: {
+export function ContactsTab({ contacts, myNumber, myName, card, openContactId, onContactOpened, onRequestCall, onAddContact, onUpdateContact, onSaveCard, onDeleteContact, onToggleFavorite }: {
     contacts:         Contact[];
     myNumber:         string;
     myName:           string;
     card:             CardOverrides;
+    openContactId?:   string | null;
+    onContactOpened?: () => void;
     onRequestCall:    (target: { number: string; name?: string }) => void;
     onAddContact:     (c: Contact) => Promise<string | null>;
     onUpdateContact:  (c: Contact) => void;
@@ -31,6 +34,20 @@ export function ContactsTab({ contacts, myNumber, myName, card, onRequestCall, o
 }) {
     const [query, setQuery] = useSessionState('phone:contactsQuery', '');
     const [selected, setSelected] = useSessionState<Contact | null>('phone:openContact', null);
+
+    useEffect(() => {
+        if (!openContactId) return;
+        void useContactsStore.getState().load().then(() => {
+            const match = useContactsStore.getState().contacts.find(c => c.id === openContactId);
+            if (match) {
+                setQuery('');
+                setShowMyCard(false);
+                setAdding(false);
+                setSelected(match);
+            }
+            onContactOpened?.();
+        });
+    }, [openContactId, onContactOpened, setQuery, setSelected]);
     const animateNav = useDidEnter();
     const [adding, setAdding] = useState(false);
     const [showMyCard, setShowMyCard] = useState(false);

@@ -11,13 +11,15 @@ interface ActionSheetButton {
 }
 
 interface Props {
+    title?:       string;
+    message?:     string;
     actions:      ActionSheetButton[];
     cancelLabel?: string;
     forceDark?:   boolean;
     onClose:      () => void;
 }
 
-export function ActionSheet({ actions, cancelLabel, forceDark = false, onClose }: Props) {
+export function ActionSheet({ title, message, actions, cancelLabel, forceDark = false, onClose }: Props) {
     const [exiting, setExiting] = useState(false);
 
     function close(after?: () => void) {
@@ -57,9 +59,16 @@ export function ActionSheet({ actions, cancelLabel, forceDark = false, onClose }
                     <span className="h-[5px] w-9 rounded-full bg-black/25 dark:bg-white/30" />
                 </button>
 
-                {actions.map(a => (
+                {(title || message) && (
+                    <div className="px-6 pb-3 pt-1">
+                        {title && <div className="break-words text-[16px] font-semibold text-black/60 dark:text-white/60">{title}</div>}
+                        {message && <div className="mt-0.5 break-words text-[14.5px] leading-snug text-ios-gray">{message}</div>}
+                    </div>
+                )}
+
+                {actions.map((a, i) => (
                     <button
-                        key={a.label}
+                        key={`${i}:${a.label}`}
                         type="button"
                         disabled={a.disabled}
                         onClick={() => { if (!a.disabled) close(a.onClick); }}

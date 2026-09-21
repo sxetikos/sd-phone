@@ -30,7 +30,11 @@ schema.tables = {
     'phone_mdt_bulletins',
     'phone_mdt_audit',
     'phone_mdt_protocols',
+    'phone_mdt_penal_overrides',
+    'phone_mdt_sop_overrides',
     'phone_mdt_medical',
+    'phone_mdt_shares',
+    'phone_mdt_revisions',
 }
 
 ---@type table[] The shipped treatment protocols, the medical terminal's counterpart to the penal
@@ -472,6 +476,43 @@ function schema.ensureSchema()
         end
     end
 
+    -- The penal code itself stays in configs/penalcode.lua. This table holds only what a server
+    -- changed from the terminal: a retuned charge, a charge of its own, or a shipped one it hid.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS phone_mdt_penal_overrides (
+            `code`         VARCHAR(16)  NOT NULL,
+            `label`        VARCHAR(120) NOT NULL,
+            `class`        VARCHAR(16)  NOT NULL,
+            `months`       INT UNSIGNED NOT NULL DEFAULT 0,
+            `fine`         INT UNSIGNED NOT NULL DEFAULT 0,
+            `description`  VARCHAR(255) NOT NULL DEFAULT '',
+            `removed`      TINYINT(1)   NOT NULL DEFAULT 0,
+            `updated_name` VARCHAR(96)  NULL,
+            `updated_at`   INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (`code`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+    migrations.apply('phone_mdt_penal_overrides')
+
+    -- Standing orders stay in configs/sops.lua. This table holds what ONE department changed from
+    -- its terminal, keyed by that department, so a force only ever rewrites its own orders.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS phone_mdt_sop_overrides (
+            `department`   VARCHAR(64)  NOT NULL,
+            `code`         VARCHAR(16)  NOT NULL,
+            `title`        VARCHAR(160) NOT NULL,
+            `category`     VARCHAR(40)  NOT NULL DEFAULT 'General',
+            `summary`      VARCHAR(255) NOT NULL DEFAULT '',
+            `revised`      VARCHAR(60)  NOT NULL DEFAULT '',
+            `body`         MEDIUMTEXT   NULL,
+            `removed`      TINYINT(1)   NOT NULL DEFAULT 0,
+            `updated_name` VARCHAR(96)  NULL,
+            `updated_at`   INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (`department`, `code`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+    migrations.apply('phone_mdt_sop_overrides')
+
     MySQL.query.await([[
         CREATE TABLE IF NOT EXISTS phone_mdt_ia_cases (
             `id`            INT          NOT NULL AUTO_INCREMENT,
@@ -626,6 +667,46 @@ function schema.ensureSchema()
     util.ensureColumns('phone_mdt_bodycam_recs', {
         shared_by = '`shared_by` VARCHAR(96) NULL',
     })
+
+    util.ensureColumns('phone_mdt_warrants', {
+        notes = '`notes` TEXT NULL',
+    })
+
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS phone_mdt_shares (
+            `id`          INT         NOT NULL AUTO_INCREMENT,
+            `entity_type` VARCHAR(16) NOT NULL,
+            `entity_ref`  VARCHAR(16) NOT NULL,
+            `department`  VARCHAR(64) NOT NULL,
+            `access`      VARCHAR(8)  NOT NULL DEFAULT 'view',
+            `shared_cid`  VARCHAR(64) NOT NULL,
+            `shared_name` VARCHAR(96) NOT NULL DEFAULT '',
+            `created_at`  INT         NOT NULL,
+            `revoked_at`  INT         NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY uniq_share (`entity_type`, `entity_ref`, `department`),
+            KEY idx_department (`department`, `entity_type`, `revoked_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+    migrations.apply('phone_mdt_shares')
+
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS phone_mdt_revisions (
+            `id`          INT         NOT NULL AUTO_INCREMENT,
+            `entity_type` VARCHAR(16) NOT NULL,
+            `entity_ref`  VARCHAR(16) NOT NULL,
+            `field`       VARCHAR(24) NOT NULL,
+            `before_value` MEDIUMTEXT NULL,
+            `after_value`  MEDIUMTEXT NULL,
+            `editor_cid`  VARCHAR(64) NOT NULL,
+            `editor_name` VARCHAR(96) NOT NULL DEFAULT '',
+            `department`  VARCHAR(64) NOT NULL DEFAULT '',
+            `created_at`  INT         NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY idx_entity (`entity_type`, `entity_ref`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+    migrations.apply('phone_mdt_revisions')
 
     -- Referential integrity, added on boot so a later install migrates with no manual SQL. Each
     -- call is a no-op once present, orphans are cleared first, and a type or collation mismatch is

@@ -681,4 +681,28 @@ function store.siblingCopies(mid)
     ) or {}
 end
 
+---The newest text message matching `q` in each of a player's threads, newest thread first.
+---Withheld copies are excluded, as in the thread list. Read-only.
+---@param citizenid string
+---@param q string
+---@param limit integer
+---@return { conversation: string, body: string, created_at: number }[]
+function store.search(citizenid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT m.conversation, m.body, m.created_at
+        FROM phone_messages m
+        INNER JOIN (
+            SELECT conversation, MAX(created_at) AS hit_at
+            FROM phone_messages
+            WHERE citizenid = ? AND withheld = 0 AND kind = 'text' AND body LIKE ? ESCAPE '\\'
+            GROUP BY conversation
+        ) h ON h.conversation = m.conversation AND h.hit_at = m.created_at
+        WHERE m.citizenid = ? AND m.withheld = 0 AND m.kind = 'text' AND m.body LIKE ? ESCAPE '\\'
+        GROUP BY m.conversation
+        ORDER BY m.created_at DESC
+        LIMIT %d
+    ]]):format(limit), { citizenid, like, citizenid, like }) or {}
+end
+
 return store

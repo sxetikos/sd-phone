@@ -14,6 +14,7 @@ import {
 } from './data';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { weazelFeed, weazelView, weazelWatch } from './weazelnewsApi';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 const SB_H = 54;
 type Filter = 'All' | Category;
@@ -77,6 +78,19 @@ export function WeazelNews({ onClose: _onClose }: { onClose: () => void }) {
             setArticles(prev => prev.map(a => (a.id === id ? { ...a, views } : a)));
         });
     }, [setOpenId]);
+
+    const [pendingArticleId, setPendingArticleId] = useState<string | null>(null);
+    useDeeplinkTarget('weazelnews', target => {
+        setManaging(false);
+        setPendingArticleId(String(target.articleId));
+    });
+    useEffect(() => {
+        if (!pendingArticleId) return;
+        const article = articles.find(a => String(a.id) === pendingArticleId);
+        if (!article) return;
+        setPendingArticleId(null);
+        openArticle(article.id);
+    }, [pendingArticleId, articles, openArticle]);
 
     const animateNav = useDidEnter();
 

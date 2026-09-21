@@ -269,6 +269,28 @@
         });
     }
 
+    function readEmails() {
+        return callPhone('GetEmails').then(function (list) {
+            return Array.isArray(list) ? list.filter(function (e) { return typeof e === 'string' && e !== ''; }) : [];
+        });
+    }
+
+    function saveLogin(data) {
+        const login = data || {};
+        if (typeof login.username !== 'string' || login.username.trim() === ''
+            || typeof login.password !== 'string' || login.password === '') {
+            console.error(`[${appLabel()}] SavePassword needs a username and a password.`);
+            return Promise.resolve(false);
+        }
+
+        return callPhone('SavePassword', {
+            username: login.username,
+            password: login.password,
+            email:    typeof login.email === 'string' ? login.email : undefined,
+            phone:    typeof login.phone === 'string' ? login.phone : undefined,
+        }).then(function (ok) { return ok === true; });
+    }
+
     function readStorage(key, fallback) {
         if (typeof key !== 'string' || key === '') return Promise.resolve(fallback === undefined ? null : fallback);
 
@@ -347,6 +369,8 @@
         CreateCall:                   startCall,
         OpenMedia:                    viewMedia,
         GetPhoneNumber:               readPhoneNumber,
+        GetEmails:                    readEmails,
+        SavePassword:                 saveLogin,
         GetStorage:                   readStorage,
         SetStorage:                   writeStorage,
         ShowConfirm:                  confirmDialog,
@@ -365,7 +389,7 @@
     globalThis.onNuiEvent      = subscribeNuiEvent;
     globalThis.useNuiEvent     = subscribeNuiEvent;
 
-    globalThis.componentsVersion = 4;
+    globalThis.componentsVersion = 5;
 
     globalThis.componentsUnsupported = Object.freeze(['SetContactModal']);
 

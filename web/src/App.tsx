@@ -52,7 +52,7 @@ import { isKeyboardCaptured } from '@/hooks/useKeyboardCapture';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { isGameClock, useGameClockStore } from '@/stores/gameClockStore';
 import { clearSessionState, seedSessionState } from '@/hooks/useSessionState';
-import { onOpenMail, onOpenMaps, onOpenMessages, requestOpenMail } from '@/shell/deeplink';
+import { onOpenAt, onOpenMail, onOpenMaps, onOpenMessages, requestOpenMail } from '@/shell/deeplink';
 import { fetchNui, isFiveM } from '@/core/nui';
 import { usePhoneReset, type PhoneResetScope } from '@/core/phoneReset';
 import { resetAuth } from '@/stores/authStore';
@@ -778,6 +778,11 @@ function AppContent() {
     useEffect(() => onOpenMail(() => {
         setLocked(false);
         handleOpenFromSwitcher('mail', { x: 0.5, y: 0.5 });
+    }), [handleOpenFromSwitcher]);
+
+    useEffect(() => onOpenAt(app => {
+        setLocked(false);
+        handleOpenFromSwitcher(app as AppId, { x: 0.5, y: 0.5 });
     }), [handleOpenFromSwitcher]);
 
     const handleRemoveFromRecents = useCallback((id: string) => {
@@ -1572,6 +1577,9 @@ function AppContent() {
     // the switcher's card set and the App Store's catalogue.
     const effectiveApps = allApps.filter(a => !device.excludedApps.includes(a.id) && (a.base || installedApps.has(a.id) || downloadingIds.includes(a.id)));
     const effectiveIds  = new Set(effectiveApps.map(a => a.id));
+    const installableApps = effectiveIds.has('appstore')
+        ? allApps.filter(a => !device.excludedApps.includes(a.id) && !effectiveIds.has(a.id))
+        : undefined;
 
     const canShowSwitcher = recentApps.length > 0 || !!currentApp;
 
@@ -1685,6 +1693,7 @@ function AppContent() {
                         <Homescreen
                             key={`${homeDensity}:${dockStyle}`}
                             apps={effectiveApps}
+                            installableApps={installableApps}
                             dock={view.dock}
                             firstPageApps={view.firstPageApps}
                             wallpaper={homeWallpaper}

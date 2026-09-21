@@ -7,6 +7,7 @@ import { useDidEnter } from '@/hooks/useDidEnter';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { useDeckActive } from '@/shell/deckActive';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { ActionSheet } from '@/ui/ActionSheet';
 import { AlertDialog } from '@/ui/AlertDialog';
 import { ImageLightbox } from '@/ui/ImageLightbox';
@@ -98,12 +99,25 @@ export function Documents({ onClose: _onClose }: { onClose: () => void }) {
         });
     }
 
-    async function openDoc(doc: DocFile) {
+    const openDoc = useCallback(async (doc: DocFile) => {
         if (doc.kind === 'image') { setLightbox(doc); return; }
         if (doc.kind === 'file')  { setFileInfo(doc); return; }
         const full = await apiGetDoc(doc.id);
         setOpenText(full ?? { ...doc, content: doc.content ?? '' });
-    }
+    }, []);
+
+    const [pendingDocId, setPendingDocId] = useState<string | null>(null);
+    useDeeplinkTarget('documents', target => setPendingDocId(String(target.docId)));
+    useEffect(() => {
+        if (!pendingDocId) return;
+        const doc = list.docs.find(d => String(d.id) === pendingDocId);
+        if (!doc) return;
+        setPendingDocId(null);
+        setOpenText(null);
+        setLightbox(null);
+        setFileInfo(null);
+        void openDoc(doc);
+    }, [pendingDocId, list.docs, openDoc]);
 
     async function createFolder(name: string, parentId: string | null) {
         const folder = await apiCreateFolder(name, parentId);

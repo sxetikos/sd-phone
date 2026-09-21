@@ -25,6 +25,7 @@ import { useDockReflow } from './useDockReflow';
 import { PARALLAX_SCALE, PARALLAX_SHIFT, type DockStyle } from './shellLook';
 import { widgetByKind } from './widgets/registry';
 import { launchOriginFrom } from './launchOrigin';
+import { Spotlight, SPOTLIGHT_PULL_COMMIT } from './spotlight/Spotlight';
 import { WidgetGallery } from './widgets/WidgetGallery';
 import { WidgetStack } from './widgets/WidgetStack';
 import { addCard, cardsOf, patchCard, removeCard } from './widgets/stack';
@@ -152,6 +153,7 @@ function newFolderKey(): string { folderSeq += 1; return `f${Date.now().toString
 
 export interface HomescreenProps {
     apps:         AppDef[];
+    installableApps?: AppDef[];
     dock:         string[];
     firstPageApps?: number;
     wallpaper:    string;
@@ -165,7 +167,7 @@ export interface HomescreenProps {
     bloomOnMount?: boolean;
 }
 
-export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, onUninstall, savedLayout, onLayoutChange, onEditingChange, homeActive = true, bloomOnMount = true }: HomescreenProps) {
+export function Homescreen({ apps, installableApps, dock, firstPageApps, wallpaper, onLaunchApp, onUninstall, savedLayout, onLayoutChange, onEditingChange, homeActive = true, bloomOnMount = true }: HomescreenProps) {
     const { blurHome, dockStyle, wallpaperParallax } = useTheme('blurHome', 'dockStyle', 'wallpaperParallax');
     const grid = useGrid();
     const rtl = useIsRtl();
@@ -503,6 +505,11 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
     const [openFolder, setOpenFolder] = useState<string | null>(null);
     const [renameFolder, setRenameFolder] = useState<string | null>(null);
     const [mergeCell, setMergeCell] = useState<number | null>(null);
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [searchPull, setSearchPull] = useState(0);
+    const [searchShown, setSearchShown] = useState(false);
+    const searchPullRef = useRef(0);
+    const hideSearch = useCallback(() => setSearchShown(false), []);
     const homeActiveRef = useRef(homeActive);
     homeActiveRef.current = homeActive;
     const editingRef = useRef(false);
@@ -512,6 +519,13 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
     onEditingChangeRef.current = onEditingChange;
     useEffect(() => { onEditingChangeRef.current?.(editing); }, [editing]);
     useEffect(() => () => { onEditingChangeRef.current?.(false); }, []);
+    useEffect(() => {
+        if (homeActive) return;
+        setSearchOpen(false);
+        setSearchPull(0);
+        searchPullRef.current = 0;
+        setSearchShown(false);
+    }, [homeActive]);
 
     const isDraggingRef = useRef(false);
     const startXRef = useRef(0); const startYRef = useRef(0);
@@ -686,6 +700,7 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
 
     function onPointerDown(e: ReactPointerEvent) {
         armLongPress(e);
+        searchPullRef.current = 0;
         lastXRef.current = e.clientX; lastTRef.current = e.timeStamp; velRef.current = 0;
         lockedAxis.current = null; capturedRef.current = false; isDraggingRef.current = true;
     }
@@ -696,6 +711,16 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
         const sign = dirSign();
         const dx = (e.clientX - startXRef.current) * sign, dy = e.clientY - startYRef.current;
         if (!lockedAxis.current && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) lockedAxis.current = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
+        if (lockedAxis.current === 'v') {
+            if (!capturedRef.current) { capturedRef.current = true; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); }
+            if (!editingRef.current && !searchOpen) {
+                const pull = Math.max(0, dy);
+                searchPullRef.current = pull;
+                if (pull > 0) { clearLP(); setSearchShown(true); }
+                setSearchPull(pull);
+            }
+            return;
+        }
         if (lockedAxis.current !== 'h') return;
         if (!capturedRef.current) { capturedRef.current = true; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); }
         const dt = e.timeStamp - lastTRef.current;
@@ -708,6 +733,11 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
     function onPointerUp() {
         if (dragId) { onIconUp(); return; }
         clearLP();
+        if (lockedAxis.current === 'v' && searchPullRef.current > 0) {
+            if (searchPullRef.current >= SPOTLIGHT_PULL_COMMIT) setSearchOpen(true);
+            searchPullRef.current = 0;
+            setSearchPull(0);
+        }
         if (lockedAxis.current === 'h') {
             const dx = dragXRef.current, vel = velRef.current, pg = pageRef.current, last = lastPage;
             if ((dx < -COMMIT_THRESHOLD || vel < -FLICK_VELOCITY) && pg < last) setPage(pg + 1);
@@ -1401,6 +1431,18 @@ export function Homescreen({ apps, dock, firstPageApps, wallpaper, onLaunchApp, 
                     destructive
                     onCancel={() => setConfirmRemove(null)}
                     onConfirm={() => { removeApp(confirmRemove.id); onUninstall?.(confirmRemove.id); setConfirmRemove(null); }}
+                />
+            )}
+
+            {(searchShown || searchOpen) && (
+                <Spotlight
+                    apps={apps}
+                    installableApps={installableApps}
+                    open={searchOpen}
+                    pull={searchPull}
+                    onLaunchApp={onLaunchApp}
+                    onClose={() => setSearchOpen(false)}
+                    onHidden={hideSearch}
                 />
             )}
         </div>

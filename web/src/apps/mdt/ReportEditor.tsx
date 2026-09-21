@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Banknote, FileText, FolderOpen, Gavel, Trash2, UserPlus, X } from 'lucide-react';
+import { Banknote, FileText, FolderOpen, Gavel, History, Share2, Trash2, UserPlus, X } from 'lucide-react';
 import type { PillTone } from '@/ui/Pill';
 
 import { t } from '@/i18n';
@@ -8,6 +8,7 @@ import { colorFor } from '@/lib/format';
 import { formatMoney } from '@/lib/money';
 import { formatMediumDate } from '@/lib/time';
 import { useAsyncData } from '@/hooks/useAsyncData';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { InitialsAvatar } from '@/shared/ContactAvatar';
 import { AlertDialog } from '@/ui/AlertDialog';
@@ -22,17 +23,21 @@ import { BookingDialog } from './BookingDialog';
 import { catalogIndex, ChargePicker, inputTotals, sentenceLabel } from './ChargePicker';
 import { EMS_INVOLVED_ROLES, EMS_REPORT_TYPES } from './data';
 import type {
-    AnyInvolvedRole, AnyReportType, Charge, ChargeInput, EvidenceItem, Involved, InvolvedRole, ReportDetail, ReportSummary, ReportType,
+    AnyInvolvedRole, AnyReportType, Charge, ChargeInput, EvidenceItem, Involved, InvolvedRole, LiveHolder, ReportDetail, ReportSummary, ReportType,
 } from './data';
-import { mdtDeleteReport, mdtReport, mdtReports, mdtSaveReport } from './mdtApi';
+import { FieldLock, LivePresence, SharedAccessPill } from './LivePresence';
+import { mdtDeleteReport, mdtPatchReport, mdtReport, mdtReports } from './mdtApi';
 import { PersonPicker } from './PersonPicker';
+import { RecordHistorySheet } from './RecordHistorySheet';
+import { RecordShareSheet } from './RecordShareSheet';
+import { useLiveRecord } from './useLiveRecord';
 import { useMdtSession, useViewEnter } from './useMdtSession';
 import { mdtPanePad, mdtRef, mdtRowHover, mdtRowMeta, mdtRowTitle, mdtSectionHeader, STATUS_TONE } from './mdtTheme';
 import { MdtButton } from './ui/MdtButton';
 import { MdtCard } from './ui/MdtCard';
 import { MdtField } from './ui/MdtField';
 import { MdtEvidence } from './ui/MdtEvidence';
-import { MdtRichField } from './ui/MdtRichField';
+import { MdtRichField, type RichCollab } from './ui/MdtRichField';
 import { MdtRichText } from './ui/MdtRichText';
 
 export const REPORT_TYPES: readonly ReportType[] = ['Incident', 'Traffic', 'Arrest', 'Investigation', 'Warrant'] as const;
@@ -109,6 +114,37 @@ function draftFrom(report: ReportDetail): EditDraft {
     };
 }
 
+type ReportField = 'title' | 'type' | 'body' | 'evidence' | 'parties';
+
+const REPORT_FIELDS: readonly ReportField[] = ['title', 'type', 'body', 'evidence', 'parties'];
+
+function fieldOf(draft: EditDraft, field: ReportField): unknown {
+    switch (field) {
+        case 'title':    return draft.title;
+        case 'type':     return draft.type;
+        case 'body':     return draft.body;
+        case 'evidence': return draft.evidence;
+        default:         return { involved: draft.involved, charges: draft.charges };
+    }
+}
+
+function withField(draft: EditDraft, field: ReportField, value: unknown): EditDraft {
+    switch (field) {
+        case 'title':    return { ...draft, title: typeof value === 'string' ? value : draft.title };
+        case 'type':     return { ...draft, type: typeof value === 'string' ? value as AnyReportType : draft.type };
+        case 'body':     return { ...draft, body: typeof value === 'string' ? value : draft.body };
+        case 'evidence': return { ...draft, evidence: Array.isArray(value) ? value as EvidenceItem[] : draft.evidence };
+        default: {
+            const parties = (value ?? {}) as { involved?: Involved[]; charges?: ChargeInput[] };
+            return { ...draft, involved: parties.involved ?? draft.involved, charges: parties.charges ?? draft.charges };
+        }
+    }
+}
+
+function sameField(a: EditDraft, b: EditDraft, field: ReportField): boolean {
+    return JSON.stringify(fieldOf(a, field)) === JSON.stringify(fieldOf(b, field));
+}
+
 export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
     reportRef: string | null;
     onSaved:   (report: ReportDetail) => void;
@@ -132,18 +168,83 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
     const [booking, setBooking] = useState<'jail' | 'fine' | null>(null);
     const [error, setError] = useState('');
     const [saving, setSaving] = useState(false);
+    const [sharing, setSharing] = useState(false);
+    const [history, setHistory] = useState(false);
+
+    const live = useLiveRecord('report', reportRef);
+    const bodyText = reportRef ? live.text('body') : null;
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'report' && share.ref === reportRef) refetch(); });
+    const touched = useRef(new Set<ReportField>());
 
     const enter = useViewEnter(draft ? 'edit' : report ? 'read' : null);
 
+    useEffect(() => {
+        if (live.savedAt > 0) refetch();
+    }, [live.savedAt, refetch]);
+
+    useEffect(() => {
+        if (!report) return;
+        const base = draftFrom(report);
+        setDraft(prev => {
+            if (!prev || prev.ref !== report.ref) return prev;
+            let next = prev;
+            for (const field of REPORT_FIELDS) {
+                if (!touched.current.has(field)) next = withField(next, field, fieldOf(base, field));
+            }
+            return next;
+        });
+    }, [report]);
+
+    const staleDraft = !!report && !report.canEdit && draft?.ref === report.ref;
+    const releaseAll = live.releaseAll;
+    useEffect(() => {
+        if (!staleDraft) return;
+        releaseAll();
+        touched.current.clear();
+        setDraft(null);
+        setStored(null);
+    }, [staleDraft, releaseAll, setStored]);
+
     function edit(next: EditDraft) {
+        const prev = draft;
         setDraft(next);
         setStored(next);
+        if (!prev || !next.ref) return;
+        for (const field of REPORT_FIELDS) {
+            if (field === 'body' && bodyText) {
+                if (next.body !== bodyText.value) bodyText.change(next.body);
+                continue;
+            }
+            if (sameField(prev, next, field)) continue;
+            touched.current.add(field);
+            live.send(field, fieldOf(next, field));
+            void live.claim(field).then(failed => {
+                if (!failed) return;
+                touched.current.delete(field);
+                setError(failed);
+                if (!report) return;
+                const base = draftFrom(report);
+                setDraft(current => (current ? withField(current, field, fieldOf(base, field)) : current));
+            });
+        }
     }
 
-    function cancel() {
+    function stopEditing() {
+        live.releaseAll();
+        touched.current.clear();
         setDraft(null);
         setStored(null);
         setError('');
+    }
+
+    function discardSharedBody() {
+        if (!bodyText || !report || live.viewers.length > 1) return;
+        if (bodyText.value !== report.body) bodyText.change(report.body);
+    }
+
+    function cancel() {
+        discardSharedBody();
+        stopEditing();
         if (reportRef === null) onClose();
     }
 
@@ -153,12 +254,20 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
             setError(t('mdt.reportNeedsTitle', 'A title is required before this can be filed.'));
             return;
         }
+        const base = report ? draftFrom(report) : null;
+        const fields = draft.ref && base
+            ? REPORT_FIELDS.filter(field => (field === 'body' && bodyText ? bodyText.value !== base.body : !sameField(draft, base, field)))
+            : undefined;
+        if (fields && fields.length === 0) {
+            stopEditing();
+            return;
+        }
         setSaving(true);
-        const next = await mdtSaveReport({
+        const res = await mdtPatchReport({
             ref:      draft.ref,
             title:    draft.title.trim(),
             type:     draft.type,
-            body:     draft.body,
+            body:     bodyText ? bodyText.value : draft.body,
             evidence: draft.evidence,
             involved: draft.involved.map(person => ({
                 citizenid: person.citizenid,
@@ -166,16 +275,15 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
                 notes:     person.notes,
             })),
             charges:  draft.charges,
+            fields,
         });
         setSaving(false);
-        if (!next) {
-            setError(t('mdt.saveFailedCharges', 'That could not be saved. Check every charge is on a listed suspect.'));
+        if (!res.value) {
+            setError(res.error ?? t('mdt.saveFailed', 'That could not be saved.'));
             return;
         }
-        setDraft(null);
-        setStored(null);
-        setError('');
-        onSaved(next);
+        stopEditing();
+        onSaved(res.value);
         refetch();
     }
 
@@ -187,14 +295,38 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
         else setError(t('mdt.deleteFailed', 'That could not be deleted.'));
     }
 
-    if (draft) {
+    if (reportRef !== null && live.gone) {
+        return (
+            <EmptyState
+                center
+                icon={FileText}
+                title={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawn', 'Access withdrawn')
+                    : t('mdt.reportGone', 'Report unavailable')}
+                subtitle={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawnSub', 'The department that owns this took it back while you had it open.')
+                    : t('mdt.reportGoneSub', 'It was deleted, or your department is not on its access list.')}
+            />
+        );
+    }
+
+    if (draft && !staleDraft) {
+        const merged = REPORT_FIELDS.reduce(
+            (acc, field) => (live.heldBy(field) ? withField(acc, field, live.liveValue(field, fieldOf(acc, field))) : acc),
+            draft,
+        );
+        const shown = bodyText ? { ...merged, body: bodyText.value } : merged;
         return (
             <>
                 <DraftView
-                    draft={draft}
+                    draft={shown}
                     saving={saving}
                     error={error}
                     enter={enter}
+                    lockedBy={live.heldBy}
+                    bodyCollab={bodyText ? { carets: bodyText.carets, flashes: bodyText.flashes, onSelect: bodyText.select } : undefined}
+                    bodyUnsaved={!!bodyText && !!report && bodyText.value !== report.body}
+                    presence={<LivePresence live={live} />}
                     onChange={edit}
                     onAddPerson={() => setPicking(true)}
                     onSave={() => void save()}
@@ -243,6 +375,8 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
     }
 
     const totals = chargeTotals(report.charges);
+    const liveTitle = live.liveValue('title', report.title);
+    const liveBody = bodyText ? bodyText.value : live.liveValue('body', report.body);
 
     const bookable = can('jail.book')
         && report.charges.length > 0
@@ -255,17 +389,37 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
                     <div className="flex items-center gap-2">
                         <span dir="ltr" className={mdtRef}>{report.ref}</span>
                         <Pill tone={reportTypeTone(report.type)}>{reportTypeLabel(report.type)}</Pill>
+                        <SharedAccessPill access={report.sharedAccess} />
                     </div>
                     <h1 className="mt-1 text-[26px] font-bold leading-tight tracking-ios-display text-black dark:text-white">
-                        {report.title}
+                        {liveTitle}
                     </h1>
                     <div className="mt-1 text-[13px] text-ios-gray">
                         {report.callsign ? `${report.callsign} · ${report.author}` : report.author}
                         {' · '}
                         {formatMediumDate(report.createdAt)}
                     </div>
+                    <FieldLock holder={live.heldBy('title')} className="mt-1" />
+                    <LivePresence live={live} />
                 </div>
                 <span className="flex flex-wrap items-center gap-3">
+                    <MdtButton
+                        size="sm"
+                        variant="text"
+                        icon={<History className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                        onClick={() => setHistory(true)}
+                    >
+                        {t('mdt.history', 'History')}
+                    </MdtButton>
+                    {report.canShare && (
+                        <MdtButton
+                            size="sm"
+                            icon={<Share2 className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                            onClick={() => setSharing(true)}
+                        >
+                            {t('mdt.share', 'Share')}
+                        </MdtButton>
+                    )}
                     {bookable && (
                         <>
                             <MdtButton
@@ -320,11 +474,14 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
 
             <div className="mt-5 grid gap-5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))' }}>
                 <div className="min-w-0">
-                    <div className={`mb-2 px-1 ${mdtSectionHeader}`}>{t('mdt.narrative', 'Narrative')}</div>
+                    <div className="mb-2 flex items-center gap-2 px-1">
+                        <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.narrative', 'Narrative')}</span>
+                        <FieldLock holder={live.heldBy('body')} />
+                    </div>
                     <MdtCard className="p-4">
-                        {report.body ? (
+                        {liveBody ? (
                             <MdtRichText
-                                text={report.body}
+                                text={liveBody}
                                 className="text-[15px] leading-relaxed text-black dark:text-white"
                             />
                         ) : (
@@ -432,15 +589,32 @@ export function ReportEditor({ reportRef, onSaved, onDeleted, onClose }: {
                     onBooked={() => setBooking(null)}
                 />
             )}
+
+            {sharing && (
+                <RecordShareSheet kind="report" recordRef={report.ref} onClose={() => setSharing(false)} />
+            )}
+
+            {history && (
+                <RecordHistorySheet
+                    kind="report"
+                    recordRef={report.ref}
+                    onClose={() => setHistory(false)}
+                    onRestored={refetch}
+                />
+            )}
         </Scroller>
     );
 }
 
-function DraftView({ draft, saving, error, enter, onChange, onAddPerson, onSave, onCancel }: {
+function DraftView({ draft, saving, error, enter, lockedBy, bodyCollab, bodyUnsaved, presence, onChange, onAddPerson, onSave, onCancel }: {
     draft:       EditDraft;
     saving:      boolean;
     error:       string;
     enter:       string;
+    lockedBy:    (field: string) => LiveHolder | null;
+    bodyCollab?: RichCollab;
+    bodyUnsaved?: boolean;
+    presence:    ReactNode;
     onChange:    (draft: EditDraft) => void;
     onAddPerson: () => void;
     onSave:      () => void;
@@ -492,6 +666,12 @@ function DraftView({ draft, saving, error, enter, onChange, onAddPerson, onSave,
         });
     }
 
+    const titleLock = lockedBy('title');
+    const typeLock = lockedBy('type');
+    const bodyLock = lockedBy('body');
+    const partiesLock = lockedBy('parties');
+    const evidenceLock = lockedBy('evidence');
+
     return (
         <Scroller key="edit" className={`h-full ${mdtPanePad} ${enter}`}>
             <h1 className="text-[26px] font-bold tracking-ios-display text-black dark:text-white">
@@ -499,52 +679,86 @@ function DraftView({ draft, saving, error, enter, onChange, onAddPerson, onSave,
                     ? t('mdt.editingReport', 'Editing {ref}', { ref: draft.ref })
                     : t('mdt.newReportTitle', 'New report')}
             </h1>
+            {presence}
 
             <div
                 ref={fieldsRef}
                 className="mt-5 grid gap-4"
                 style={{ gridTemplateColumns: stackFields ? '1fr' : 'minmax(240px, 1fr) 220px' }}
             >
-                <MdtField
-                    label={t('mdt.title', 'Title')}
-                    value={draft.title}
-                    onChange={v => onChange({ ...draft, title: v })}
-                    maxLength={160}
-                    placeholder={t('mdt.reportTitleHint', 'Armed robbery on Vespucci Boulevard')}
-                />
-                <MdtField
-                    label={t('mdt.type', 'Type')}
-                    value={draft.type}
-                    onChange={v => onChange({ ...draft, type: v as ReportType })}
-                    options={(medical ? EMS_REPORT_TYPES : REPORT_TYPES)
-                        .map((type: string) => ({ value: type, label: reportTypeLabel(type) }))}
-                />
+                <div className="min-w-0">
+                    <MdtField
+                        label={t('mdt.title', 'Title')}
+                        value={draft.title}
+                        onChange={v => onChange({ ...draft, title: v })}
+                        maxLength={160}
+                        disabled={titleLock !== null}
+                        placeholder={t('mdt.reportTitleHint', 'Armed robbery on Vespucci Boulevard')}
+                    />
+                    <FieldLock holder={titleLock} className="mt-1" />
+                </div>
+                <div className="min-w-0">
+                    <MdtField
+                        label={t('mdt.type', 'Type')}
+                        value={draft.type}
+                        onChange={v => onChange({ ...draft, type: v as ReportType })}
+                        disabled={typeLock !== null}
+                        options={(medical ? EMS_REPORT_TYPES : REPORT_TYPES)
+                            .map((type: string) => ({ value: type, label: reportTypeLabel(type) }))}
+                    />
+                    <FieldLock holder={typeLock} className="mt-1" />
+                </div>
             </div>
 
             <div className="mt-4">
-                <MdtRichField
-                    rows={8}
-                    label={t('mdt.narrative', 'Narrative')}
-                    value={draft.body}
-                    onChange={v => onChange({ ...draft, body: v })}
-                    maxLength={12000}
-                    placeholder={t('mdt.narrativeHint', 'What happened, in the order it happened.')}
-                />
+                {bodyLock ? (
+                    <>
+                        <div className="mb-1 flex items-center gap-2">
+                            <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.narrative', 'Narrative')}</span>
+                            <FieldLock holder={bodyLock} />
+                        </div>
+                        <MdtCard className="p-4">
+                            {draft.body ? (
+                                <MdtRichText text={draft.body} className="text-[15px] leading-relaxed text-black dark:text-white" />
+                            ) : (
+                                <div className="text-[14px] text-ios-gray">{t('mdt.noNarrative', 'No narrative was written for this report.')}</div>
+                            )}
+                        </MdtCard>
+                    </>
+                ) : (
+                    <MdtRichField
+                        rows={8}
+                        label={t('mdt.narrative', 'Narrative')}
+                        value={draft.body}
+                        onChange={v => onChange({ ...draft, body: v })}
+                        maxLength={12000}
+                        placeholder={t('mdt.narrativeHint', 'What happened, in the order it happened.')}
+                        collab={bodyCollab}
+                    />
+                )}
+                {bodyUnsaved && bodyCollab && (
+                    <div className="mt-1 px-1 text-[12px] text-ios-gray">
+                        {t('mdt.sharedUnsaved', 'Shared draft, not filed yet. Save files it for everyone.')}
+                    </div>
+                )}
             </div>
 
             <div className="mt-5">
                 <div className="mb-2 flex items-center gap-2 px-1">
                     <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.involved', 'Involved')}</span>
-                    <MdtButton
-                        size="sm"
-                        variant="text"
-                        icon={<UserPlus className="h-[14px] w-[14px]" strokeWidth={2.4} />}
-                        onClick={onAddPerson}
-                    >
-                        {t('mdt.addPerson', 'Add a person')}
-                    </MdtButton>
+                    <FieldLock holder={partiesLock} />
+                    {!partiesLock && (
+                        <MdtButton
+                            size="sm"
+                            variant="text"
+                            icon={<UserPlus className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                            onClick={onAddPerson}
+                        >
+                            {t('mdt.addPerson', 'Add a person')}
+                        </MdtButton>
+                    )}
                 </div>
-                <MdtCard className="overflow-hidden">
+                <MdtCard className={`overflow-hidden ${partiesLock ? 'pointer-events-none opacity-60' : ''}`}>
                     {draft.involved.length === 0 ? (
                         <div className="px-4 py-5 text-center text-[14px] text-ios-gray">
                             {t('mdt.noInvolvedYet', 'Nobody attached yet. Charges need a suspect on the report.')}
@@ -588,7 +802,7 @@ function DraftView({ draft, saving, error, enter, onChange, onAddPerson, onSave,
             </div>
 
             {!medical && (
-                <div className="mt-5">
+                <div className={`mt-5 ${partiesLock ? 'pointer-events-none opacity-60' : ''}`}>
                     <div className={`mb-2 px-1 ${mdtSectionHeader}`}>{t('mdt.charges', 'Charges')}</div>
                     {suspects.length === 0 ? (
                         <MdtCard className="px-4 py-5 text-center text-[14px] text-ios-gray">
@@ -606,9 +820,10 @@ function DraftView({ draft, saving, error, enter, onChange, onAddPerson, onSave,
             )}
 
             <div className="mt-5">
+                <FieldLock holder={evidenceLock} className="mb-2 px-1" />
                 <MdtEvidence
                     items={draft.evidence}
-                    onChange={evidence => onChange({ ...draft, evidence })}
+                    onChange={evidenceLock ? undefined : evidence => onChange({ ...draft, evidence })}
                 />
             </div>
 

@@ -57,6 +57,13 @@ function locale.load(lang)
     local path = ('locales/%s.json'):format(lang)
     local file = LoadResourceFile(GetCurrentResourceName(), path)
 
+    local base = lang:match('^(%a%a)[-_]')
+    if not file and base then
+        lang = base:lower()
+        path = ('locales/%s.json'):format(lang)
+        file = LoadResourceFile(GetCurrentResourceName(), path)
+    end
+
     if not file and lang ~= 'en' then
         print('^3[SD-PHONE] Falling back to English locale^0')
         path = 'locales/en.json'

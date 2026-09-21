@@ -3,19 +3,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { device } from '@device';
 import { fetchNui, hostResource } from '@/core/nui';
 import { apiData } from '@/core/api';
+import { accountsMyEmail, accountsSaveCustomPassword } from '@/core/accountsApi';
 import { apiSavePhotoFromUrl } from '@/core/photosApi';
 import { t, getLocale, getLocaleTag } from '@/i18n';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useTheme, useThemeStore } from '@/stores/themeStore';
 import { useCustomAppsStore } from '@/stores/customAppsStore';
 import { getGameRender } from '@/render';
-import { portalToPhoneScreen } from '@/ui/portal';
 import { Sheet } from '@/ui/Sheet';
+import { ActionSheet } from '@/ui/ActionSheet';
+import { AlertDialog } from '@/ui/AlertDialog';
+import { PromptDialog } from '@/ui/PromptDialog';
 import { MediaPickerSheet } from '@/shared/MediaPickerSheet';
 import { EmojiPanel } from '@/shared/chat/EmojiPanel';
+import { uploadVoiceMessage } from '@/shared/chat/messagesApi';
 import { GifPickerSheet } from '@/shared/chat/GifPickerSheet';
 import { ContactPickerSheet } from '@/shared/ContactPickerSheet';
 import { formatPhone } from '@/apps/phone/data';
+import { accentVars } from '@/apps/settings/appearance/accentRamp';
+import { isCustomPaletteId, rampFor, rampVars } from '@/apps/settings/appearance/paletteRamp';
 import { Camera } from '@/apps/camera/Camera';
 import { AppIconSVG } from './AppIconSVG';
 import { useDeckActive } from './deckActive';
@@ -64,6 +70,22 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     });
 }
 
+function applyPhoneTheme(body: HTMLElement) {
+    const s = useThemeStore.getState();
+    const mode = s.theme === 'dark' ? 'dark' : 'light';
+    body.setAttribute('data-theme', mode);
+    body.setAttribute('data-dark-theme', s.darkTheme);
+    body.setAttribute('data-light-theme', s.lightTheme);
+    const vars: Record<string, string> = accentVars(mode, s.accent);
+    const activeId = mode === 'dark' ? s.darkTheme : s.lightTheme;
+    if (isCustomPaletteId(activeId)) {
+        const palette = s.customPalettes.find(p => p.id === activeId);
+        if (palette) Object.assign(vars, rampVars(rampFor(palette.mode, palette)));
+    }
+    for (const name of Array.from(body.style)) if (name.startsWith('--')) body.style.removeProperty(name);
+    for (const [name, value] of Object.entries(vars)) body.style.setProperty(name, value);
+}
+
 function buildSettings(): Record<string, unknown> {
     const s = useThemeStore.getState();
     return {
@@ -97,6 +119,7 @@ interface CtxMenuData {
 }
 interface GalleryReq { multiple?: boolean; type?: string; max?: number }
 interface ColorReq { value?: string }
+interface SaveLoginReq { username: string; password: string; email?: string; phone?: string }
 
 const SWATCHES = [
     '#FF3B30', '#FF9500', '#FFCC00', '#34C759', '#00C7BE', '#30B0C7', '#007AFF',
@@ -105,7 +128,7 @@ const SWATCHES = [
 
 export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () => void }) {
     const def = useCustomAppsStore(s => s.apps.find(a => a.id === appId));
-    const { theme, airplaneMode, hour24, brightness } = useTheme('theme', 'airplaneMode', 'hour24', 'brightness');
+    const { theme, darkTheme, lightTheme, accent, customPalettes, airplaneMode, hour24, brightness } = useTheme('theme', 'darkTheme', 'lightTheme', 'accent', 'customPalettes', 'airplaneMode', 'hour24', 'brightness');
     const active = useDeckActive();
 
     const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -145,6 +168,7 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
     const [gifOpen, setGifOpen]     = useState(false);
     const [contactOpen, setContact] = useState(false);
     const [colorReq, setColorReq]   = useState<ColorReq | null>(null);
+    const [saveLogin, setSaveLogin] = useState<SaveLoginReq | null>(null);
     const [fullImage, setFullImage] = useState<string | null>(null);
     const [cameraOpen, setCameraOpen] = useState(false);
 
@@ -155,6 +179,7 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
     const gifResolve     = useRef<((v: string | null) => void) | null>(null);
     const contactResolve = useRef<((v: unknown) => void) | null>(null);
     const colorResolve   = useRef<((v: string | null) => void) | null>(null);
+    const saveLoginResolve = useRef<((v: boolean) => void) | null>(null);
     const cameraResolve  = useRef<((v: string | null) => void) | null>(null);
 
     const settleEmoji = useCallback((value: string | null) => {
@@ -187,6 +212,14 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
         setContact(false);
         if (r) r(value);
     }, []);
+    const settleSaveLogin = useCallback((accepted: boolean) => {
+        const r = saveLoginResolve.current; saveLoginResolve.current = null;
+        const req = saveLogin;
+        setSaveLogin(null);
+        if (!r) return;
+        if (!accepted || !req) { r(false); return; }
+        void accountsSaveCustomPassword(appId, { ...req }).then(r, () => r(false));
+    }, [appId, saveLogin]);
     const settleColor = useCallback((value: string | null) => {
         const r = colorResolve.current; colorResolve.current = null;
         setColorReq(null);
@@ -229,7 +262,7 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
         try {
             const dataUrl = await blobToDataUrl(blob);
             if (type === 'audio' || type === 'voice') {
-                return (await apiData<{ url: string }>('sd-phone:messages:uploadVoice', { audio: dataUrl }))?.url ?? null;
+                return await uploadVoiceMessage(dataUrl, blob);
             }
             return (await apiData<{ url: string }>('sd-phone:media:upload', { type, data: dataUrl }))?.url ?? null;
         } catch {
@@ -313,6 +346,22 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
                 return apiData<{ number?: string }>('sd-phone:accounts:myNumber')
                     .then(r => r?.number ?? null)
                     .catch(() => null);
+            case 'GetEmails':
+                return accountsMyEmail().catch(() => []);
+            case 'SavePassword': {
+                const username = typeof data?.username === 'string' ? data.username.trim() : '';
+                const password = typeof data?.password === 'string' ? data.password : '';
+                if (!username || !password || saveLoginResolve.current) return Promise.resolve(false);
+                return new Promise<boolean>(res => {
+                    saveLoginResolve.current = res;
+                    setSaveLogin({
+                        username,
+                        password,
+                        email: typeof data?.email === 'string' ? data.email : undefined,
+                        phone: typeof data?.phone === 'string' ? data.phone : undefined,
+                    });
+                });
+            }
             case 'GetStorage': {
                 const k = storageKey(data?.key);
                 if (!k) return Promise.resolve(null);
@@ -480,7 +529,7 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
                 doc.body.style.padding = '0';
                 doc.body.style.width = '100%';
                 doc.body.style.height = '100%';
-                doc.body.setAttribute('data-theme', theme);
+                applyPhoneTheme(doc.body);
                 doc.body.setAttribute('data-device', 'phone');
             }
             win.resourceName      = d.resource;
@@ -523,17 +572,18 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
             console.warn('[sd-phone] custom-app iframe injection failed (expected outside FiveM)', err);
         }
         setReady(true);
-    }, [theme, bridge, setApp, markSdkReady]);
+    }, [bridge, setApp, markSdkReady]);
 
     useEffect(() => {
         if (!loadedRef.current) return;
         const iframe = iframeRef.current;
         if (!iframe) return;
         try {
-            iframe.contentDocument?.body?.setAttribute('data-theme', theme);
+            const body = iframe.contentDocument?.body;
+            if (body) applyPhoneTheme(body);
         } catch { /* cross-origin */ }
         postToApp({ type: 'settingsUpdated', settings: buildSettings() });
-    }, [theme, airplaneMode, hour24, brightness, postToApp]);
+    }, [theme, darkTheme, lightTheme, accent, customPalettes, airplaneMode, hour24, brightness, postToApp]);
 
     useEffect(() => {
         function onFrameMessage(event: MessageEvent) {
@@ -611,38 +661,20 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
                 </div>
             )}
 
-            {popup && (
-                <PopupCard
-                    data={popup}
-                    onButton={settlePopup}
-                    onDismiss={() => settlePopup(undefined)}
-                    onInput={streamPopupInput}
-                />
-            )}
+            {popup && <PopupHost data={popup} onSettle={settlePopup} onInput={streamPopupInput} />}
 
             {ctxMenu && (
-                <Sheet fit="content" onClose={() => settleCtx(undefined)} title={ctxMenu.title} className="bg-base">
-                    {({ close }) => (
-                        <div className="px-4 pb-2">
-                            {ctxMenu.description && (
-                                <p className="px-1 pb-2 text-center text-[14px] text-ios-gray">{ctxMenu.description}</p>
-                            )}
-                            <div className="overflow-hidden rounded-[12px] bg-surface">
-                                {(ctxMenu.buttons ?? []).map((b, i, arr) => (
-                                    <button
-                                        key={i}
-                                        type="button"
-                                        onClick={() => { const r = ctxResolve.current; ctxResolve.current = null; if (r) r(b.callbackId ?? i); close(); }}
-                                        className={`flex w-full items-center px-4 py-3.5 text-start text-[18px] font-medium active:bg-black/[0.06] dark:active:bg-white/[0.06] ${i < arr.length - 1 ? 'border-b border-hairline/10' : ''}`}
-                                        style={{ color: b.color ?? undefined }}
-                                    >
-                                        {b.title ?? b.text ?? b.label ?? ''}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </Sheet>
+                <ActionSheet
+                    title={ctxMenu.title}
+                    message={ctxMenu.description}
+                    actions={(ctxMenu.buttons ?? []).map((b, i) => ({
+                        label:       buttonLabel(b),
+                        destructive: isDestructive(b.color),
+                        onClick:     () => settleCtx(b.callbackId ?? i),
+                    }))}
+                    cancelLabel={t('common.cancel', 'Cancel')}
+                    onClose={() => window.setTimeout(() => settleCtx(undefined), 0)}
+                />
             )}
 
             {gallery && (
@@ -701,6 +733,17 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
                 </div>
             )}
 
+            {saveLogin && (
+                <AlertDialog
+                    title={t('common.saveToPasswords', 'Save to Passwords?')}
+                    message={t('common.savePasswordsBody', 'Keep your {appName} username and password in the Passwords app so you can always find them.', { appName: def?.name ?? appId })}
+                    confirmLabel={t('common.save', 'Save')}
+                    cancelLabel={t('common.notNow', 'Not Now')}
+                    onCancel={() => settleSaveLogin(false)}
+                    onConfirm={() => settleSaveLogin(true)}
+                />
+            )}
+
             {colorReq && (
                 <Sheet fit="content" onClose={() => settleColor(null)} title={t('customApps.pickColor', 'Pick a Color')} className="bg-base">
                     {({ close }) => (
@@ -734,68 +777,79 @@ export function CustomAppFrame({ appId, onClose }: { appId: string; onClose: () 
     );
 }
 
-function PopupCard({ data, onButton, onDismiss, onInput }: {
-    data:      PopupData;
-    onButton:  (id: number | undefined) => void;
-    onDismiss: () => void;
-    onInput:   (value: string) => void;
+function buttonLabel(b: PopupBtn): string {
+    return b.title ?? b.text ?? b.label ?? '';
+}
+
+function isDestructive(color?: string): boolean {
+    if (!color) return false;
+    const c = color.trim().toLowerCase();
+    if (c === 'red' || c === 'crimson' || c === 'danger') return true;
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(c)?.[1];
+    if (!hex) return false;
+    const full = hex.length === 3 ? hex.split('').map(ch => ch + ch).join('') : hex;
+    const [r, g, b] = [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16));
+    return r >= 180 && g <= 110 && b <= 110;
+}
+
+function PopupHost({ data, onSettle, onInput }: {
+    data:     PopupData;
+    onSettle: (id: number | undefined) => void;
+    onInput:  (value: string) => void;
 }) {
     const buttons = data.buttons ?? [];
-    const horizontal = buttons.length <= 2;
+    const message = data.description ?? data.message;
+    const field = data.input ?? data.inputs?.[0];
+    const idOf = (i: number) => buttons[i]?.callbackId ?? i;
 
-    return portalToPhoneScreen(
-        <div
-            className="absolute inset-0 z-[70] flex items-center justify-center backdrop-blur-md"
-            style={{ background: 'rgba(0,0,0,0.28)', animation: 'ios-sheet-backdrop-in 0.18s ease-out' }}
-            onPointerDown={e => { if (e.target === e.currentTarget) onDismiss(); }}
-        >
-            <div
-                className="flex w-[300px] flex-col overflow-hidden rounded-[18px] bg-elevated/80 text-center text-black backdrop-blur-2xl dark:bg-elevated/90 dark:text-white"
-                style={{ animation: 'ios-alert-in 0.22s cubic-bezier(0.32,0.72,0,1)' }}
-            >
-                <div className="px-5 pb-4 pt-5">
-                    {data.title && <div className="text-[19px] font-semibold leading-snug">{data.title}</div>}
-                    {(data.description ?? data.message) && (
-                        <div className="mt-1.5 text-[14px] leading-snug text-black/80 dark:text-white/85">{data.description ?? data.message}</div>
-                    )}
-                    {data.input && (
-                        <input
-                            type={data.input.type === 'password' ? 'password' : data.input.type === 'number' ? 'number' : 'text'}
-                            defaultValue={data.input.value}
-                            placeholder={data.input.placeholder}
-                            onChange={e => onInput(e.target.value)}
-                            className="mt-3 w-full rounded-[8px] border border-black/15 bg-white px-3 py-2 text-[15px] text-black outline-none dark:border-white/15 dark:bg-white/10 dark:text-white"
-                        />
-                    )}
-                    {data.inputs?.map((inp, i) => (
-                        <input
-                            key={i}
-                            type={inp.type === 'password' ? 'password' : 'text'}
-                            defaultValue={inp.value}
-                            placeholder={inp.placeholder}
-                            className="mt-2 w-full rounded-[8px] border border-black/15 bg-white px-3 py-2 text-[15px] text-black outline-none dark:border-white/15 dark:bg-white/10 dark:text-white"
-                        />
-                    ))}
-                </div>
+    if (field) {
+        const last = buttons.length - 1;
+        const cancel = buttons.length > 1 ? buttons[0] : undefined;
+        return (
+            <PromptDialog
+                title={data.title ?? ''}
+                message={message}
+                placeholder={field.placeholder}
+                initialValue={field.value}
+                secure={field.type === 'password'}
+                inputMode={field.type === 'number' ? 'numeric' : undefined}
+                allowEmpty
+                sanitize={value => { onInput(value); return value; }}
+                confirmLabel={last >= 0 ? buttonLabel(buttons[last]) || undefined : undefined}
+                cancelLabel={cancel ? buttonLabel(cancel) || undefined : undefined}
+                onCancel={() => onSettle(cancel ? idOf(0) : undefined)}
+                onConfirm={value => { onInput(value); onSettle(last >= 0 ? idOf(last) : undefined); }}
+            />
+        );
+    }
 
-                <div className={`border-t border-black/[0.13] dark:border-white/[0.13] ${horizontal ? 'flex' : 'flex flex-col'}`}>
-                    {buttons.length === 0 ? (
-                        <button type="button" onClick={() => onButton(undefined)} className="flex-1 px-4 py-[13px] text-[18px] font-semibold text-ios-blue active:bg-black/10 dark:active:bg-white/10">
-                            {t('common.ok', 'OK')}
-                        </button>
-                    ) : buttons.map((b, i) => (
-                        <button
-                            key={i}
-                            type="button"
-                            onClick={() => onButton(b.callbackId ?? i)}
-                            className={`flex-1 px-4 py-[13px] text-[18px] active:bg-black/10 dark:active:bg-white/10 ${horizontal && i > 0 ? 'border-s border-black/[0.13] dark:border-white/[0.13]' : ''} ${!horizontal && i > 0 ? 'border-t border-black/[0.13] dark:border-white/[0.13]' : ''}`}
-                            style={{ color: b.color ?? undefined }}
-                        >
-                            {b.title ?? b.text ?? b.label ?? ''}
-                        </button>
-                    ))}
-                </div>
-            </div>
-        </div>,
+    if (buttons.length > 2) {
+        return (
+            <ActionSheet
+                title={data.title}
+                message={message}
+                actions={buttons.map((b, i) => ({
+                    label:       buttonLabel(b),
+                    destructive: isDestructive(b.color),
+                    onClick:     () => onSettle(idOf(i)),
+                }))}
+                cancelLabel={t('common.cancel', 'Cancel')}
+                onClose={() => window.setTimeout(() => onSettle(undefined), 0)}
+            />
+        );
+    }
+
+    const confirm = buttons.length === 2 ? 1 : 0;
+    return (
+        <AlertDialog
+            title={data.title ?? ''}
+            message={message}
+            hideCancel={buttons.length < 2}
+            confirmLabel={buttons.length > 0 ? buttonLabel(buttons[confirm]) || undefined : undefined}
+            cancelLabel={buttons.length === 2 ? buttonLabel(buttons[0]) || undefined : undefined}
+            destructive={isDestructive(buttons[confirm]?.color)}
+            onCancel={() => onSettle(buttons.length === 2 ? idOf(0) : undefined)}
+            onConfirm={() => onSettle(buttons.length > 0 ? idOf(confirm) : undefined)}
+        />
     );
 }

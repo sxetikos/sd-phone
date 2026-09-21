@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { fetchNui, isFiveM } from '@/core/nui';
 import { useDidEnter } from '@/hooks/useDidEnter';
@@ -10,10 +10,18 @@ import type { Note, NotesState } from './data';
 import { NoteEditor } from './NoteEditor';
 import { NotesList } from './NotesList';
 import { t } from '@/i18n';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 export function Notes({ onClose }: { onClose: () => void }) {
     const [state, setState] = useState<NotesState>(() => (isFiveM ? { notes: [] } : loadState()));
     const [openId, setOpenId] = useSessionState<string | null>('notes:openNoteId', null);
+    const [pendingNoteId, setPendingNoteId] = useState<string | null>(null);
+    useDeeplinkTarget('notes', target => setPendingNoteId(target.noteId));
+    useEffect(() => {
+        if (!pendingNoteId || !state.notes.some(n => n.id === pendingNoteId)) return;
+        setOpenId(pendingNoteId);
+        setPendingNoteId(null);
+    }, [pendingNoteId, state.notes, setOpenId]);
 
     useNuiQuery<NotesState>('sd-phone:notes:list', { enabled: isFiveM, onData: setState });
 

@@ -7,6 +7,7 @@ import { useAsyncData } from '@/hooks/useAsyncData';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { useDeckActive } from '@/shell/deckActive';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { Spinner } from '@/ui/Spinner';
 import { calendarDelete, calendarList, calendarSave } from './calendarApi';
 import {
@@ -30,6 +31,26 @@ export function Calendar({ onClose }: { onClose: () => void }) {
     const [editing, setEditing]   = useState<CalEvent | 'new' | null>(null);
 
     const { settled, refetch } = useAsyncData(calendarList, [], { onData: setEvents });
+
+    const [pendingEventId, setPendingEventId] = useState<string | null>(null);
+    const [scrollMonth, setScrollMonth] = useState<Date | null>(null);
+    useDeeplinkTarget('calendar', target => {
+        const [y, m, d] = String(target.date ?? '').split('-').map(Number);
+        if (y && m && d) {
+            const day = new Date(y, m - 1, d);
+            setSelected(day);
+            setScrollMonth(day);
+        }
+        setEditing(null);
+        setPendingEventId(target.eventId ? String(target.eventId) : null);
+    });
+    useEffect(() => {
+        if (!pendingEventId) return;
+        const ev = events.find(e => String(e.id) === pendingEventId);
+        if (!ev) return;
+        setEditing(ev);
+        setPendingEventId(null);
+    }, [pendingEventId, events]);
 
     const importedLegacy = useRef(false);
     useEffect(() => {
@@ -72,6 +93,12 @@ export function Calendar({ onClose }: { onClose: () => void }) {
     useEffect(() => {
         todayMonthRef.current?.scrollIntoView({ block: 'start' });
     }, []);
+    useEffect(() => {
+        if (!scrollMonth) return;
+        const idx = (scrollMonth.getFullYear() - today.getFullYear()) * 12 + scrollMonth.getMonth() - today.getMonth() + 12;
+        scrollerRef.current?.children[idx]?.scrollIntoView({ block: 'start' });
+        setScrollMonth(null);
+    }, [scrollMonth, today]);
 
     const selectedKey  = dayKey(selected);
     const selectedEvts = useMemo(

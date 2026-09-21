@@ -107,6 +107,17 @@ export async function accountsSavePassword(app: string, values: Record<string, s
     });
 }
 
+export async function accountsSaveCustomPassword(appId: string, values: Record<string, string | undefined>): Promise<boolean> {
+    if (!isFiveM) {
+        DEV_VAULT.push({ id: Date.now(), app: `custom:${appId}`, username: values.username ?? '', password: values.password ?? '', email: values.email, phone: values.phone, created: Math.floor(Date.now() / 1000) });
+        return true;
+    }
+    const res = await fetchNui<{ success?: boolean }>('sd-phone:accounts:saveCustomPassword', {
+        app: appId, username: values.username, password: values.password, email: values.email, phone: values.phone,
+    });
+    return res?.success === true;
+}
+
 export async function accountsListPasswords(): Promise<VaultEntry[]> {
     if (!isFiveM) return [...DEV_VAULT];
     return (await apiData<{ entries: VaultEntry[] }>('sd-phone:accounts:listPasswords'))?.entries ?? [];

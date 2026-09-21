@@ -9,6 +9,7 @@ import { useDidEnter } from '@/hooks/useDidEnter';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { clearSessionState, useSessionState } from '@/hooks/useSessionState';
 import { useDeckActive } from '@/shell/deckActive';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { AccountSwitcher } from '@/shared/AccountSwitcher';
 import { AppAuth } from '@/shared/AppAuth';
 import { AlertDialog } from '@/ui/AlertDialog';
@@ -57,7 +58,16 @@ export function Birdy({ onClose }: { onClose: () => void }) {
     const [switching,      setSwitching]      = useState(false);
     const [adding,         setAdding]         = useState(false);
     const [profile,        setProfile]        = useState<BirdyProfile | null>(null);
+    const [profileNonce,   setProfileNonce]   = useState(0);
     const [sendError,      setSendError]      = useState<string | null>(null);
+
+    useDeeplinkTarget('birdy', target => {
+        setComposing(false);
+        setEditingProfile(false);
+        setOpenPostId(null);
+        setOpenConvoId(null);
+        openProfile(String(target.handle));
+    });
 
     // AppDeck retains this subtree, so refetching needs an explicit nonce.
     const [feedNonce, setFeedNonce] = useState(0);
@@ -156,7 +166,7 @@ export function Birdy({ onClose }: { onClose: () => void }) {
         let alive = true;
         void apiProfile(profileTarget ?? undefined).then(p => { if (alive) setProfile(p); });
         return () => { alive = false; };
-    }, [profileOpen, profileTarget]);
+    }, [profileOpen, profileTarget, profileNonce]);
 
     useNuiEvent('sd-phone:birdy:dmReceived', useCallback(data => {
         if (!data) return;
@@ -301,6 +311,7 @@ export function Birdy({ onClose }: { onClose: () => void }) {
     function openProfile(handle?: string) {
         const target = typeof handle === 'string' ? handle : undefined;
         setProfile(null);
+        setProfileNonce(n => n + 1);
         setProfileTarget(target ?? null);
         setProfileOpen(true);
         setPostOverProfile(false);

@@ -109,4 +109,19 @@ function store.hasBody(cid, body)
         'SELECT 1 FROM `phone_notes` WHERE citizenid = ? AND body = ? LIMIT 1', { cid, body }) ~= nil
 end
 
+---A player's notes whose text contains `q`, newest-edited first. Read-only.
+---@param cid string
+---@param q string
+---@param limit integer
+---@return { id: string, body: string }[]
+function store.search(cid, q, limit)
+    local like = '%' .. util.escapeLike(q) .. '%'
+    return MySQL.query.await(([[
+        SELECT id, body FROM `phone_notes`
+        WHERE citizenid = ? AND body LIKE ? ESCAPE '\\'
+        ORDER BY updated_at DESC
+        LIMIT %d
+    ]]):format(limit), { cid, like }) or {}
+end
+
 return store

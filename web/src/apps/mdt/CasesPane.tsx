@@ -5,6 +5,7 @@ import { device } from '@device';
 import { t } from '@/i18n';
 import { formatListDate } from '@/lib/time';
 import { useAsyncData } from '@/hooks/useAsyncData';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { EmptyState } from '@/ui/EmptyState';
 import { ListColumn } from '@/ui/ListColumn';
@@ -18,6 +19,7 @@ import {
     CASE_PRIORITIES, CASE_STATUSES, CaseFile, casePriorityLabel, caseStatusLabel,
 } from './CaseFile';
 import type { CasePriority, CaseStatus, CaseSummary } from './data';
+import { SharedAccessPill } from './LivePresence';
 import { mdtCases } from './mdtApi';
 import { useMdtSession } from './useMdtSession';
 import { mdtRef, mdtRowHover, mdtRowMeta, mdtRowTitle, mdtSegmented, STATUS_TONE } from './mdtTheme';
@@ -46,6 +48,7 @@ function CaseListRow({ file, selected, onPress }: {
             <span className="flex w-full items-center gap-2">
                 <span dir="ltr" className={`shrink-0 ${mdtRef}`}>{file.ref}</span>
                 <span className={`min-w-0 flex-1 truncate ${mdtRowTitle}`}>{file.title}</span>
+                <SharedAccessPill access={file.sharedAccess} />
                 <Pill tone={STATUS_TONE[file.status] ?? 'blue'}>{caseStatusLabel(file.status)}</Pill>
             </span>
             <span className={`flex w-full items-center gap-2 ${mdtRowMeta}`}>
@@ -62,7 +65,8 @@ function CaseListRow({ file, selected, onPress }: {
 }
 
 export function CasesPane() {
-    const { can, selected, select } = useMdtSession();
+    const { can, selected, select, department } = useMdtSession();
+    const court = department?.type === 'doj';
 
     const [status, setStatus] = useSessionState<StatusFilter>('mdt:cases:status', 'all');
     const [priority, setPriority] = useSessionState<PriorityFilter>('mdt:cases:priority', 'all');
@@ -86,6 +90,7 @@ export function CasesPane() {
         }),
         [term, status, priority, page],
     );
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'case') refetch(); });
 
     const rows = data?.rows ?? [];
     const total = data?.total ?? 0;
@@ -105,12 +110,16 @@ export function CasesPane() {
         <EmptyState
             center
             icon={FolderOpen}
-            title={term ? t('mdt.noMatchingCases', 'No matching cases') : t('mdt.noCases', 'No case files')}
+            title={term
+                ? t('mdt.noMatchingCases', 'No matching cases')
+                : court ? t('mdt.noSharedCases', 'Nothing shared yet') : t('mdt.noCases', 'No case files')}
             subtitle={loading
                 ? undefined
                 : term
                     ? t('mdt.noMatchingCasesSub', 'Nothing matches that title or reference.')
-                    : t('mdt.noCasesSub', 'A case groups the reports and the people of one investigation.')}
+                    : court
+                        ? t('mdt.noSharedCasesSub', 'Case files police share with your department show up here.')
+                        : t('mdt.noCasesSub', 'A case groups the reports and the people of one investigation.')}
         />
     );
 

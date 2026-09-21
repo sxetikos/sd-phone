@@ -19,6 +19,7 @@ import { t } from '@/i18n';
 import { useStreamerHidden } from '@/stores/themeStore';
 import { failText } from '@/core/api';
 import { StatusBarSpacer } from '@/ui/StatusBarSpacer';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 const HISTORY_CAP = 48;
 
@@ -39,6 +40,12 @@ export function Stocks({ onClose }: { onClose: () => void }) {
     const hideBalance = hiddenByUser || forcedHidden;
     const [showPortfolio, setShowPortfolio] = useSessionState('stocks:portfolio', false);
     const [trade, setTrade] = useState<{ mode: TradeMode; symbol?: string } | null>(null);
+
+    useDeeplinkTarget('stocks', target => {
+        setTrade(null);
+        setShowPortfolio(false);
+        setOpenSymbol(String(target.symbol));
+    });
 
     async function refresh() { setMarket(await fetchMarket()); }
     useEffect(() => { void refresh(); }, []);

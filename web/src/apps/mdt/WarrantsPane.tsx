@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
-import { FileText, Gavel, UserPlus, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { FileText, Gavel, History, Pencil, Share2, UserPlus, X } from 'lucide-react';
 
 import { t } from '@/i18n';
 import { colorFor } from '@/lib/format';
 import { formatMoney } from '@/lib/money';
 import { formatMediumDate } from '@/lib/time';
 import { useAsyncData } from '@/hooks/useAsyncData';
+import { useNuiEvent } from '@/hooks/useNuiEvent';
 import { useSessionState } from '@/hooks/useSessionState';
 import { InitialsAvatar } from '@/shared/ContactAvatar';
 import { AlertDialog } from '@/ui/AlertDialog';
@@ -19,8 +20,12 @@ import { SegmentedControl } from '@/ui/SegmentedControl';
 
 import { catalogIndex, ChargePicker, inputTotals, sentenceLabel } from './ChargePicker';
 import type { ChargeInput, Warrant } from './data';
-import { mdtCloseWarrant, mdtIssueWarrant, mdtWarrant, mdtWarrantVoid, mdtWarrants } from './mdtApi';
+import { FieldLock, LivePresence, SharedAccessPill } from './LivePresence';
+import { mdtCloseWarrant, mdtIssueWarrant, mdtUpdateWarrant, mdtWarrant, mdtWarrantVoid, mdtWarrants } from './mdtApi';
 import { PersonPicker } from './PersonPicker';
+import { RecordHistorySheet } from './RecordHistorySheet';
+import { RecordShareSheet } from './RecordShareSheet';
+import { useLiveRecord, type LiveRecord } from './useLiveRecord';
 import { ReportLinker } from './ReportEditor';
 import { useMdtSession } from './useMdtSession';
 import { mdtPanePad, mdtRef, mdtRowHover, mdtRowMeta, mdtRowTitle, mdtSectionHeader, STATUS_TONE } from './mdtTheme';
@@ -60,6 +65,7 @@ function WarrantListRow({ warrant, selected, onPress }: {
             <span className="flex w-full items-center gap-2">
                 <span dir="ltr" className={`shrink-0 ${mdtRef}`}>{warrant.ref}</span>
                 <span className={`min-w-0 flex-1 truncate ${mdtRowTitle}`}>{warrant.subject}</span>
+                <SharedAccessPill access={warrant.sharedAccess} />
                 <span className={`shrink-0 tabular-nums ${mdtRowMeta}`}>{expiryLabel(warrant)}</span>
             </span>
             <span className="flex w-full items-center gap-1.5">
@@ -94,6 +100,7 @@ export function WarrantsPane() {
         () => mdtWarrants({ status, query: term, page }),
         [status, term, page],
     );
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'warrant') refetch(); });
 
     const rows = data?.rows ?? [];
     const total = data?.total ?? 0;
@@ -213,11 +220,20 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
     const { open } = useMdtSession();
 
     const [warrant, setWarrant] = useState<Warrant | null>(null);
-    const { loading } = useAsyncData(() => mdtWarrant(warrantRef), [warrantRef], { onData: setWarrant });
+    const { loading, refetch } = useAsyncData(() => mdtWarrant(warrantRef), [warrantRef], { onData: setWarrant });
+    const live = useLiveRecord('warrant', warrantRef);
+    useNuiEvent('sd-phone:mdt:shares', share => { if (share.type === 'warrant' && share.ref === warrantRef) refetch(); });
 
     const [confirm, setConfirm] = useState(false);
     const [voiding, setVoiding] = useState(false);
+    const [editing, setEditing] = useState(false);
+    const [sharing, setSharing] = useState(false);
+    const [history, setHistory] = useState(false);
     const [error, setError] = useState('');
+
+    useEffect(() => {
+        if (live.savedAt > 0) refetch();
+    }, [live.savedAt, refetch]);
 
     async function close() {
         setConfirm(false);
@@ -242,6 +258,37 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
         if (next) setWarrant(next);
         setError('');
         onClosed();
+    }
+
+    if (live.gone) {
+        return (
+            <EmptyState
+                center
+                icon={Gavel}
+                title={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawn', 'Access withdrawn')
+                    : t('mdt.warrantGone', 'Warrant unavailable')}
+                subtitle={live.gone === 'revoked'
+                    ? t('mdt.shareWithdrawnSub', 'The department that owns this took it back while you had it open.')
+                    : t('mdt.warrantGoneSub', 'It is no longer on file.')}
+            />
+        );
+    }
+
+    if (warrant && editing) {
+        return (
+            <EditWarrant
+                warrant={warrant}
+                live={live}
+                onCancel={() => { live.releaseAll(); setEditing(false); }}
+                onSaved={next => {
+                    live.releaseAll();
+                    setWarrant(next);
+                    setEditing(false);
+                    onClosed();
+                }}
+            />
+        );
     }
 
     if (!warrant) {
@@ -273,6 +320,7 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
                         <Pill tone={warrant.active ? 'red' : 'green'}>
                             {warrant.active ? t('mdt.active', 'Active') : t('mdt.closed', 'Closed')}
                         </Pill>
+                        <SharedAccessPill access={warrant.sharedAccess} />
                     </div>
                     <h1 className="mt-1 text-[26px] font-bold leading-tight tracking-ios-display text-black dark:text-white">
                         {warrant.subject}
@@ -285,7 +333,35 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
                             date: formatMediumDate(warrant.issuedAt),
                         })}
                     </div>
+                    <LivePresence live={live} />
                 </div>
+                <MdtButton
+                    size="sm"
+                    variant="text"
+                    icon={<History className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                    onClick={() => setHistory(true)}
+                >
+                    {t('mdt.history', 'History')}
+                </MdtButton>
+                {warrant.canShare && (
+                    <MdtButton
+                        size="sm"
+                        icon={<Share2 className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                        onClick={() => setSharing(true)}
+                    >
+                        {t('mdt.share', 'Share')}
+                    </MdtButton>
+                )}
+                {warrant.canEdit && (
+                    <MdtButton
+                        size="sm"
+                        variant="filled"
+                        icon={<Pencil className="h-[14px] w-[14px]" strokeWidth={2.4} />}
+                        onClick={() => setEditing(true)}
+                    >
+                        {t('common.edit', 'Edit')}
+                    </MdtButton>
+                )}
                 {canVoid && warrant.active ? (
                     <MdtButton variant="destructive" size="sm" onClick={() => setVoiding(true)}>
                         {t('mdt.voidWarrant', 'Quash warrant')}
@@ -353,8 +429,35 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
                 ))}
             </MdtCard>
 
+            {(warrant.notes || live.heldBy('notes')) && (
+                <>
+                    <div className="mb-2 mt-5 flex items-center gap-2 px-1">
+                        <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.caseNotes', 'Notes')}</span>
+                        <FieldLock holder={live.heldBy('notes')} />
+                    </div>
+                    <MdtCard className="p-4">
+                        <p dir="auto" className="whitespace-pre-wrap text-[15px] leading-relaxed text-black dark:text-white">
+                            {live.liveValue('notes', warrant.notes ?? '')}
+                        </p>
+                    </MdtCard>
+                </>
+            )}
+
             {error && <div className="mt-4 text-[14px] text-ios-red">{error}</div>}
             <div className="h-6" />
+
+            {sharing && (
+                <RecordShareSheet kind="warrant" recordRef={warrant.ref} onClose={() => setSharing(false)} />
+            )}
+
+            {history && (
+                <RecordHistorySheet
+                    kind="warrant"
+                    recordRef={warrant.ref}
+                    onClose={() => setHistory(false)}
+                    onRestored={refetch}
+                />
+            )}
 
             {confirm && (
                 <AlertDialog
@@ -377,6 +480,178 @@ function WarrantDetail({ warrantRef, canClose, canVoid, onClosed }: {
                     onConfirm={() => void quash()}
                 />
             )}
+        </Scroller>
+    );
+}
+
+type WarrantField = 'charges' | 'bond' | 'expiry' | 'notes';
+
+interface WarrantDraft {
+    charges: ChargeInput[];
+    days:    string;
+    bond:    string;
+    notes:   string;
+}
+
+function daysLeft(warrant: Warrant): string {
+    return String(Math.max(1, Math.ceil((warrant.expiresAt - Math.floor(Date.now() / 1000)) / DAY)));
+}
+
+function warrantDraft(warrant: Warrant): WarrantDraft {
+    return {
+        charges: warrant.charges.map(c => ({ code: c.code, count: c.count })),
+        days:    daysLeft(warrant),
+        bond:    String(warrant.bond),
+        notes:   warrant.notes ?? '',
+    };
+}
+
+function draftValue(draft: WarrantDraft, field: WarrantField): unknown {
+    if (field === 'charges') return draft.charges;
+    if (field === 'bond') return draft.bond;
+    if (field === 'expiry') return draft.days;
+    return draft.notes;
+}
+
+function EditWarrant({ warrant, live, onCancel, onSaved }: {
+    warrant:  Warrant;
+    live:     LiveRecord;
+    onCancel: () => void;
+    onSaved:  (warrant: Warrant) => void;
+}) {
+    const [draft, setDraft] = useState<WarrantDraft>(() => warrantDraft(warrant));
+    const [error, setError] = useState('');
+    const [saving, setSaving] = useState(false);
+    const base = useRef(warrantDraft(warrant));
+
+    const locks: Record<WarrantField, ReturnType<LiveRecord['heldBy']>> = {
+        charges: live.heldBy('charges'),
+        bond:    live.heldBy('bond'),
+        expiry:  live.heldBy('expiry'),
+        notes:   live.heldBy('notes'),
+    };
+
+    const shown: WarrantDraft = {
+        charges: live.liveValue('charges', draft.charges),
+        days:    live.liveValue('expiry', draft.days),
+        bond:    live.liveValue('bond', draft.bond),
+        notes:   live.liveValue('notes', draft.notes),
+    };
+
+    function change(field: WarrantField, next: WarrantDraft) {
+        setDraft(next);
+        live.send(field, draftValue(next, field));
+        void live.claim(field).then(failed => {
+            if (!failed) return;
+            setError(failed);
+            setDraft(current => {
+                const reverted = { ...current };
+                if (field === 'charges') reverted.charges = base.current.charges;
+                if (field === 'bond') reverted.bond = base.current.bond;
+                if (field === 'expiry') reverted.days = base.current.days;
+                if (field === 'notes') reverted.notes = base.current.notes;
+                return reverted;
+            });
+        });
+    }
+
+    async function save() {
+        if (saving) return;
+        const fields = (['charges', 'bond', 'expiry', 'notes'] as const).filter(field =>
+            JSON.stringify(draftValue(draft, field)) !== JSON.stringify(draftValue(base.current, field)));
+        if (fields.length === 0) {
+            onCancel();
+            return;
+        }
+        if (draft.charges.length === 0) {
+            setError(t('mdt.warrantNeedsCharges', 'Attach a report, or pick at least one charge.'));
+            return;
+        }
+        setSaving(true);
+        const days = Math.max(1, Number(draft.days) || 1);
+        const res = await mdtUpdateWarrant({
+            ref:       warrant.ref,
+            charges:   draft.charges,
+            bond:      Number(draft.bond) || 0,
+            expiresAt: fields.includes('expiry') ? Math.floor(Date.now() / 1000) + days * DAY : warrant.expiresAt,
+            notes:     draft.notes,
+            fields:    [...fields],
+        });
+        setSaving(false);
+        if (!res.value) {
+            setError(res.error ?? t('mdt.saveFailed', 'That could not be saved.'));
+            return;
+        }
+        onSaved(res.value);
+    }
+
+    return (
+        <Scroller className={`h-full ${mdtPanePad}`}>
+            <h1 className="text-[26px] font-bold tracking-ios-display text-black dark:text-white">
+                {t('mdt.editingWarrant', 'Editing {ref}', { ref: warrant.ref })}
+            </h1>
+            <div className="mt-1 text-[13px] text-ios-gray">{warrant.subject}</div>
+            <LivePresence live={live} />
+
+            <div className="mb-2 mt-5 flex items-center gap-2 px-1">
+                <span className={`flex-1 ${mdtSectionHeader}`}>{t('mdt.charges', 'Charges')}</span>
+                <FieldLock holder={locks.charges} />
+            </div>
+            <div className={locks.charges ? 'pointer-events-none opacity-60' : ''}>
+                <ChargePicker
+                    className="min-h-[320px]"
+                    lines={shown.charges}
+                    onChange={charges => change('charges', { ...draft, charges })}
+                />
+            </div>
+
+            <div className="mt-5 grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+                <div className="min-w-0">
+                    <MdtField
+                        label={t('mdt.expiryDays', 'Expires in days')}
+                        value={shown.days}
+                        onChange={v => change('expiry', { ...draft, days: v.replace(/\D/g, '').slice(0, 3) })}
+                        inputMode="numeric"
+                        disabled={locks.expiry !== null}
+                        placeholder="7"
+                    />
+                    <FieldLock holder={locks.expiry} className="mt-1" />
+                </div>
+                <div className="min-w-0">
+                    <MdtField
+                        label={t('mdt.bond', 'Bond')}
+                        value={shown.bond}
+                        onChange={v => change('bond', { ...draft, bond: v.replace(/\D/g, '').slice(0, 7) })}
+                        inputMode="numeric"
+                        disabled={locks.bond !== null}
+                        placeholder="0"
+                    />
+                    <FieldLock holder={locks.bond} className="mt-1" />
+                </div>
+            </div>
+
+            <div className="mt-5">
+                <MdtField
+                    label={t('mdt.caseNotes', 'Notes')}
+                    value={shown.notes}
+                    onChange={v => change('notes', { ...draft, notes: v })}
+                    multiline
+                    rows={4}
+                    maxLength={2000}
+                    disabled={locks.notes !== null}
+                    placeholder={t('mdt.warrantNotesHint', 'Conditions, service notes or instructions from the court.')}
+                />
+                <FieldLock holder={locks.notes} className="mt-1" />
+            </div>
+
+            {error && <div className="mt-4 text-[14px] text-ios-red">{error}</div>}
+
+            <div className="mt-5 flex flex-wrap items-center gap-3 pb-6">
+                <MdtButton variant="filled" disabled={saving} onClick={() => void save()}>
+                    {saving ? t('mdt.saving', 'Saving') : t('common.save', 'Save')}
+                </MdtButton>
+                <MdtButton variant="text" onClick={onCancel}>{t('common.cancel', 'Cancel')}</MdtButton>
+            </div>
         </Scroller>
     );
 }

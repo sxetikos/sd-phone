@@ -15,49 +15,42 @@ import { ProfileCard } from './account/ProfileCard';
 import { SoundHapticsPage } from './sound/SoundHapticsPage';
 import { SearchBar } from '@/ui/SearchBar';
 import { SettingsRow } from './SettingsRow';
-import { getSettingsGroups } from './data';
+import { filterSettingsGroups, getSettingsGroups, pageForRow, SettingsPage } from './data';
 import { SettingsGroup } from './SettingsGroup';
 import { PushLayer } from './SettingsSubPage';
 import { WallpaperPage } from './appearance/WallpaperPage';
 import { SimBackupPage } from './sim/SimBackupPage';
-import { useSimStore } from '@/stores/simStore';
 import { BluetoothPage } from './bluetooth/BluetoothPage';
 import { WifiPage } from './wifi/WifiPage';
-import { useWifiConfigured, useWifiConnected } from '@/stores/wifiStore';
+import { useWifiConnected } from '@/stores/wifiStore';
 import { shellHostsPet } from '@/shell/chassis';
 import { shellFor } from '@/shell/shells';
 import { useTheme } from '@/stores/themeStore';
-import { useBluetoothConfigured } from '@/stores/bluetoothStore';
+import { useSettingsVisibility } from './useSettingsVisibility';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
-type SubPage = 'general' | 'accessibility' | 'display' | 'island-pet' | 'wallpaper' | 'app-icons' | 'home-density' | 'notifications' | 'sound-haptics' | 'face-unlock' | 'phone' | 'streamer' | 'sim' | 'wifi' | 'bluetooth' | null;
+type SubPage = SettingsPage | null;
 
 export function Settings({ onClose }: { onClose: () => void }) {
     const [subPage, setSubPage] = useSessionState<SubPage>('settings:subPage', null);
     const [query,   setQuery]   = useSessionState('settings:query', '');
-    const simEnabled = useSimStore(s => s.enabled);
-    const wifiConfigured = useWifiConfigured();
-    const bluetoothConfigured = useBluetoothConfigured();
+    useDeeplinkTarget('settings', target => {
+        setQuery('');
+        setSubPage(target.page);
+    });
+    const visibility = useSettingsVisibility();
     const wifi = useWifiConnected();
 
     const { shell, streamerMode } = useTheme('shell', 'streamerMode');
     const petHost = shellHostsPet(shellFor(shell, device.id));
 
-    // The SIM & Backup row only exists while the server runs unique phones.
-    const settingsGroups = getSettingsGroups()
-        .map(g => simEnabled ? g : { ...g, rows: g.rows.filter(r => r.id !== 'sim') })
-        .map(g => device.calls ? g : { ...g, rows: g.rows.filter(r => r.id !== 'phone') })
-        // A device with no shells to choose from (the tablet) simply has no island, so the row
-        // goes. A phone on a chassis whose cutout cannot hold the pill keeps the row, greyed, so
-        // the pets stay discoverable and it is obvious the shell is what put them out of reach.
-        .map(g => device.screen.island ? g : { ...g, rows: g.rows.filter(r => r.id !== 'island-pet') })
+    const settingsGroups = filterSettingsGroups(getSettingsGroups(), visibility)
         .map(g => petHost ? g : {
             ...g,
             rows: g.rows.map(r => (r.id === 'island-pet'
                 ? { ...r, disabled: true, subtitle: t('settings.islandPetNeedsIsland', 'Needs the default Rounded shell') }
                 : r)),
         })
-        .map(g => wifiConfigured ? g : { ...g, rows: g.rows.filter(r => r.id !== 'wifi') })
-        .map(g => bluetoothConfigured ? g : { ...g, rows: g.rows.filter(r => r.id !== 'bluetooth') })
         .map(g => ({
             ...g,
             rows: g.rows.map(r => (r.id === 'wifi'
@@ -83,21 +76,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
     function handleRowPress(id: string) {
         setQuery('');
-        if (id === 'general')       setSubPage('general');
-        if (id === 'accessibility') setSubPage('accessibility');
-        if (id === 'display')       setSubPage('display');
-        if (id === 'island-pet')    setSubPage('island-pet');
-        if (id === 'wallpaper')     setSubPage('wallpaper');
-        if (id === 'app-icons')     setSubPage('app-icons');
-        if (id === 'home-density')  setSubPage('home-density');
-        if (id === 'notifications') setSubPage('notifications');
-        if (id === 'sound-haptics') setSubPage('sound-haptics');
-        if (id === 'face-unlock')   setSubPage('face-unlock');
-        if (id === 'phone')         setSubPage('phone');
-        if (id === 'streamer')      setSubPage('streamer');
-        if (id === 'sim')           setSubPage('sim');
-        if (id === 'wifi')          setSubPage('wifi');
-        if (id === 'bluetooth')     setSubPage('bluetooth');
+        setSubPage(pageForRow(id));
     }
 
     const sub =

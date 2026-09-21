@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
     Car, Check, CircleAlert, ClipboardPaste, Copy, Crosshair, DollarSign, Flag, Fuel, Heart,
     Home, Image as ImageIcon, MapPin, Navigation, Plus, Share, ShoppingCart, Skull, Star, Trash2, Wrench,
@@ -25,7 +25,8 @@ import type { IconKey, MapMarker } from './data';
 import { ContactsPanel, FriendDot, PeoplePanel, useFriendsRoster } from './PeoplePanel';
 import type { Friend } from '@/apps/findfriends/data';
 import { decodeWaypoint, encodeWaypoint } from '@/lib/waypointCode';
-import { takeMapsTarget } from '@/shell/deeplink';
+import { onOpenMaps, takeMapsTarget } from '@/shell/deeplink';
+import type { MapsTarget } from '@/shell/deeplink';
 import { fetchDirectory } from '@/apps/services/servicesApi';
 import type { Company } from '@/apps/services/data';
 import { t } from '@/i18n';
@@ -63,49 +64,65 @@ export function Maps({ onClose }: { onClose: () => void }) {
         return () => { alive = false; };
     }, []);
 
-    useEffect(() => {
-        const target = takeMapsTarget();
-        let alive = true;
+    const [sheetTab, setSheetTab] = useSessionState<'pins' | 'people' | 'companies'>('maps:sheetTab', 'pins');
+    const markersRef = useRef(markers);
+    useEffect(() => { markersRef.current = markers; }, [markers]);
+    const loadedRef = useRef(!isFiveM);
+    const pendingPinRef = useRef<MapsTarget | null>(null);
 
-        const companyTarget = target?.companyId ? target : null;
-        const pinTarget = companyTarget ? null : target;
-        if (companyTarget) {
-            setSheetTab('companies');
-            setSelectedCompany(companyTarget.companyId!);
-            window.setTimeout(() => mapRef.current?.centerOnWorld(companyTarget.x, companyTarget.y), 240);
-        }
-
-        const focus = (id: string, x: number, y: number) => {
+    const withTarget = useCallback((list: MapMarker[], target: MapsTarget | null): MapMarker[] => {
+        if (!target) return list;
+        const focus = (id: string) => {
             setSelected(id);
-            window.setTimeout(() => mapRef.current?.centerOnWorld(x, y), 220);
+            window.setTimeout(() => mapRef.current?.centerOnWorld(target.x, target.y), 220);
         };
-        const withTarget = (list: MapMarker[]): MapMarker[] => {
-            const target = pinTarget;
-            if (!target) return list;
-            const label = target.label || t('maps.sharedLocation', 'Shared location');
-            const found = list.find(p => p.label === label && Math.abs(p.x - target.x) < 1 && Math.abs(p.y - target.y) < 1);
-            if (found) { focus(found.id, target.x, target.y); return list; }
-            const m: MapMarker = {
-                id: newId(), label, x: target.x, y: target.y,
-                icon:  (ICON_KEYS as readonly string[]).includes(target.icon ?? '') ? (target.icon as IconKey) : 'MapPin',
-                color: target.color ?? COLOR_SWATCHES[0],
-            };
-            const next = [m, ...list];
-            if (isFiveM) void fetchNui('sd-phone:maps:save', { markers: next }); else saveMarkers(next);
-            focus(m.id, target.x, target.y);
-            return next;
+        const label = target.label || t('maps.sharedLocation', 'Shared location');
+        const found = list.find(p => p.label === label && Math.abs(p.x - target.x) < 1 && Math.abs(p.y - target.y) < 1);
+        if (found) { focus(found.id); return list; }
+        const m: MapMarker = {
+            id: newId(), label, x: target.x, y: target.y,
+            icon:  (ICON_KEYS as readonly string[]).includes(target.icon ?? '') ? (target.icon as IconKey) : 'MapPin',
+            color: target.color ?? COLOR_SWATCHES[0],
         };
+        const next = [m, ...list];
+        if (isFiveM) void fetchNui('sd-phone:maps:save', { markers: next }); else saveMarkers(next);
+        focus(m.id);
+        return next;
+    }, [setSelected]);
 
-        if (isFiveM) {
-            fetchNui<{ data?: MapMarker[] }>('sd-phone:maps:list')
-                .then(r => { if (alive) setMarkers(withTarget(Array.isArray(r?.data) ? r.data : [])); })
-                .catch(() => {});
-        } else if (pinTarget) {
-            setMarkers(prev => withTarget(prev));
+    const applyMapsTarget = useCallback(() => {
+        const target = takeMapsTarget();
+        if (!target) return;
+        if (target.companyId) {
+            setSheetTab('companies');
+            setSelectedCompany(target.companyId);
+            window.setTimeout(() => mapRef.current?.centerOnWorld(target.x, target.y), 240);
+            return;
         }
+        if (!loadedRef.current) { pendingPinRef.current = target; return; }
+        const next = withTarget(markersRef.current, target);
+        if (next !== markersRef.current) { markersRef.current = next; setMarkers(next); }
+    }, [withTarget, setSheetTab, setSelectedCompany]);
+
+    useLayoutEffect(applyMapsTarget, [applyMapsTarget]);
+    useEffect(() => onOpenMaps(applyMapsTarget), [applyMapsTarget]);
+
+    useEffect(() => {
+        if (!isFiveM) return;
+        let alive = true;
+        fetchNui<{ data?: MapMarker[] }>('sd-phone:maps:list')
+            .then(r => {
+                if (!alive) return;
+                loadedRef.current = true;
+                const pin = pendingPinRef.current;
+                pendingPinRef.current = null;
+                const next = withTarget(Array.isArray(r?.data) ? r.data : [], pin);
+                markersRef.current = next;
+                setMarkers(next);
+            })
+            .catch(() => { loadedRef.current = true; pendingPinRef.current = null; });
         return () => { alive = false; };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [withTarget]);
 
     // Shared with the ryde consumers: useSelfLocation refcounts the native stream and gates it on
     // useDeckActive. Maps used to duplicate this inline without either, so a backgrounded Maps kept
@@ -136,7 +153,6 @@ export function Maps({ onClose }: { onClose: () => void }) {
 
     const [peopleOn, setPeopleOn] = useState(true);
     useEffect(() => { void mapsConfig().then(c => setPeopleOn(c.people)); }, []);
-    const [sheetTab, setSheetTab] = useSessionState<'pins' | 'people' | 'companies'>('maps:sheetTab', 'pins');
     const [friendSel, setFriendSel] = useSessionState<string | null>('maps:friendSel', null);
     const [pickerOpen, setPickerOpen] = useSessionState('maps:friendPicker', false);
     const { friends, visible: visibleFriends, toggleShare, removeFriend, addFriend, respond, addError } = useFriendsRoster(peopleOn);

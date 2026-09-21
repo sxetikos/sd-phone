@@ -706,17 +706,19 @@ function actions.changePassword(source, payload)
     return ok()
 end
 
----Saves one login into the caller's own Passwords-app vault, with fields capped to their column
----widths and a bare email getting the mail domain appended.
----@param source number player server id
----@param payload { app: string, username: string, password: string, email?: string, phone?: string }|nil
----@return table envelope
-function actions.savePassword(source, payload)
-    payload = payload or {}
-    local app = payload.app
-    if not ALL_APPS[app] then return fail('accounts.unknownApp', 'Unknown app') end
-    local cid = player.getIdentifier(source); if not cid then return fail('accounts.playerNotFound', 'Player not found') end
+---@type integer Most logins one custom app may keep in a single character's vault.
+local CUSTOM_VAULT_CAP <const> = 10
 
+---@type integer Longest custom app identifier the vault's app column holds behind its prefix.
+local CUSTOM_ID_MAX <const> = 64
+
+---Writes one validated login into a character's vault under an already-trusted app key, with
+---fields capped to their column widths and a bare email getting the mail domain appended.
+---@param cid string framework per-character id
+---@param app string vault app key
+---@param payload table { username, password, email?, phone? }
+---@return table envelope
+local function saveVault(cid, app, payload)
     local username = trim(payload.username):lower()
     local password = payload.password
     if username == '' or type(password) ~= 'string' or password == '' then
@@ -734,6 +736,37 @@ function actions.savePassword(source, payload)
         email ~= '' and email or nil,
         phone ~= '' and phone or nil)
     return ok()
+end
+
+---Saves one login into the caller's own Passwords-app vault.
+---@param source number player server id
+---@param payload { app: string, username: string, password: string, email?: string, phone?: string }|nil
+---@return table envelope
+function actions.savePassword(source, payload)
+    payload = payload or {}
+    if not ALL_APPS[payload.app] then return fail('accounts.unknownApp', 'Unknown app') end
+    local cid = player.getIdentifier(source); if not cid then return fail('accounts.playerNotFound', 'Player not found') end
+    return saveVault(cid, payload.app, payload)
+end
+
+---Saves a login a custom app asked to keep, under that app's own key so it can never land on a
+---built-in app's entry. Write-only: nothing hands a custom app its saved logins back. Capped per
+---app so one cannot fill a character's vault.
+---@param source number player server id
+---@param payload { app: string, username: string, password: string, email?: string, phone?: string }|nil
+---@return table envelope
+function actions.saveCustomPassword(source, payload)
+    payload = payload or {}
+    local id = type(payload.app) == 'string' and trim(payload.app) or ''
+    if id == '' or #id > CUSTOM_ID_MAX or id:find('%c') then return fail('accounts.unknownApp', 'Unknown app') end
+    local cid = player.getIdentifier(source); if not cid then return fail('accounts.playerNotFound', 'Player not found') end
+
+    local app = 'custom:' .. id
+    local username = trim(payload.username):lower()
+    if store.countVaultEntries(cid, app, username) >= CUSTOM_VAULT_CAP then
+        return fail('accounts.vaultFull', 'This app has saved too many logins. Remove one in Passwords first.')
+    end
+    return saveVault(cid, app, payload)
 end
 
 ---Returns the caller's own vault entries; empty for an unresolvable identity.

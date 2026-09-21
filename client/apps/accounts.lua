@@ -19,5 +19,6 @@ proxyCallback('sd-phone:accounts:suggestCode',  'sd-phone:server:accounts:sugges
 proxyCallback('sd-phone:accounts:myNumber',     'sd-phone:server:accounts:myNumber')
 proxyCallback('sd-phone:accounts:myEmail',      'sd-phone:server:accounts:myEmail')
 proxyCallback('sd-phone:accounts:savePassword',   'sd-phone:server:accounts:savePassword')
+proxyCallback('sd-phone:accounts:saveCustomPassword', 'sd-phone:server:accounts:saveCustomPassword')
 proxyCallback('sd-phone:accounts:listPasswords',  'sd-phone:server:accounts:listPasswords')
 proxyCallback('sd-phone:accounts:deletePassword', 'sd-phone:server:accounts:deletePassword')

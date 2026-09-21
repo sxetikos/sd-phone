@@ -10,7 +10,7 @@ import { VoicemailTab } from './voicemail/VoicemailTab';
 import { recordingEnabled } from './callrecApi';
 import { AlertDialog } from '@/ui/AlertDialog';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
-import { useSessionState } from '@/hooks/useSessionState';
+import { seedSessionState, useSessionState } from '@/hooks/useSessionState';
 import { formatPhone, toCallEntry, type Contact } from './data';
 import {
     updateContactApi, deleteContactApi,
@@ -22,12 +22,27 @@ import { useCallStore } from '@/stores/callStore';
 import { t } from '@/i18n';
 import { failText } from '@/core/api';
 import { StatusBarSpacer } from '@/ui/StatusBarSpacer';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 
 interface CallTarget { number: string; name?: string; video?: boolean }
 
 export function Phone({ onClose: _onClose }: { onClose: () => void }) {
     const [tab,        setTab]        = useSessionState<PhoneTab>('phone:tab', 'contacts');
     const [recordingsOn, setRecordingsOn] = useState(false);
+    const [openContactId, setOpenContactId] = useState<string | null>(null);
+    const [recentsKey, setRecentsKey] = useState(0);
+
+    useDeeplinkTarget('phone', target => {
+        if ('tab' in target) {
+            seedSessionState('phone:recentsFilter', 'all');
+            setRecentsKey(k => k + 1);
+            setOpenContactId(null);
+            setTab(target.tab);
+            return;
+        }
+        setTab('contacts');
+        setOpenContactId(target.contactId);
+    });
 
     useEffect(() => {
         void recordingEnabled().then(on => {
@@ -109,6 +124,8 @@ export function Phone({ onClose: _onClose }: { onClose: () => void }) {
         void useContactsStore.getState().refresh();
     }, []));
 
+    const handleContactOpened = useCallback(() => setOpenContactId(null), []);
+
     return (
         <div className="absolute inset-0 flex flex-col bg-base font-sf">
             <StatusBarSpacer />
@@ -126,6 +143,8 @@ export function Phone({ onClose: _onClose }: { onClose: () => void }) {
                             myNumber={myNumber}
                             myName={myName}
                             card={card}
+                            openContactId={openContactId}
+                            onContactOpened={handleContactOpened}
                             onRequestCall={setCallTarget}
                             onAddContact={addContact}
                             onUpdateContact={updateContact}
@@ -135,6 +154,7 @@ export function Phone({ onClose: _onClose }: { onClose: () => void }) {
                         />
                     ) : tab === 'recents' ? (
                         <RecentsTab
+                            key={recentsKey}
                             recents={recents}
                             onAddContact={addContact}
                             onRequestCall={setCallTarget}

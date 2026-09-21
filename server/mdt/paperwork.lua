@@ -8,6 +8,12 @@ local store    = require 'server.mdt.store'
 local access   = require 'server.mdt.access'
 ---@type table Penal code (server.mdt.offences): the only place charge arithmetic happens.
 local offences = require 'server.mdt.offences'
+---@type table Live records (server.mdt.live): field locks, the saved push and the access registry.
+local live      = require 'server.mdt.live'
+---@type table Court shares (server.mdt.shares): which police paperwork a court department may open.
+local shares    = require 'server.mdt.shares'
+---@type table Revision history (server.mdt.revisions): the field-by-field trail of amendments.
+local revisions = require 'server.mdt.revisions'
 
 ---@type table Paperwork module; the table returned at end of file. Reports and cases, including
 ---the per-record restriction rows that decide who may even list a report.
@@ -89,10 +95,114 @@ local function likeSafe(term)
     return (term:gsub('([%%_\\])', '\\%1'))
 end
 
+---The fields a save may write: those named and allowed, or every allowed field when none are named.
+---@param list any client field list
+---@param allowed table<string, boolean>
+---@return table<string, boolean> fields
+local function requestedFields(list, allowed)
+    local out = {}
+    if type(list) ~= 'table' then
+        for field in pairs(allowed) do out[field] = true end
+        return out
+    end
+    for i = 1, #list do
+        local field = list[i]
+        if type(field) == 'string' and allowed[field] then out[field] = true end
+    end
+    return out
+end
+
+---The first field of a save that someone else holds the live lock on, with their name.
+---@param kind string
+---@param ref string
+---@param fields table<string, boolean>
+---@param src integer
+---@return table|nil refusal
+local function lockRefusal(kind, ref, fields, src)
+    for field in pairs(fields) do
+        local holder = live.lockedByOther(kind, ref, field, src)
+        if holder then return util.fail('mdt.fieldBeingEdited', '{name} is editing that', { name = holder }) end
+    end
+    return nil
+end
+
+---@type integer Longest editor name a revision keeps, matching phone_mdt_revisions.editor_name.
+local EDITOR_NAME_MAX <const> = 96
+
+---The identity a shared text's revision is filed under: the saver, naming whoever else typed into it.
+---@param me table editor identity
+---@param kind string
+---@param ref string
+---@param field string
+---@return table editor
+local function withContributors(me, kind, ref, field)
+    local others = live.contributors(kind, ref, field, me.citizenid)
+    if #others == 0 then return me end
+    local editor = {}
+    for key, value in pairs(me) do editor[key] = value end
+    editor.name = (('%s (with %s)'):format(me.name, table.concat(others, ', '))):sub(1, EDITOR_NAME_MAX)
+    return editor
+end
+
+---The shared text a save should file for a field, when terminals have it open and it was asked for.
+---@param kind string
+---@param ref string
+---@param field string
+---@param fields table<string, boolean>
+---@param payload table
+---@return string|nil text, integer|nil rev
+local function sharedText(kind, ref, field, fields, payload)
+    if payload.restoring or not fields[field] then return nil, nil end
+    return live.textOf(kind, ref, field)
+end
+
+---Writes a revision per change and tells everyone on the record what was saved.
+---@param me table editor identity
+---@param kind string
+---@param ref string
+---@param src integer
+---@param fields table<string, boolean> every field the save covered
+---@param changed { field: string, before: string, after: string }[]
+---@param texts table<string, { text: string, rev: integer|nil }>|nil what each shared text field now holds
+local function settle(me, kind, ref, src, fields, changed, texts)
+    for i = 1, #changed do
+        local field = changed[i].field
+        local editor = texts and texts[field] and withContributors(me, kind, ref, field) or me
+        revisions.record(editor, kind, ref, field, changed[i].before, changed[i].after)
+    end
+    local names = {}
+    for field in pairs(fields) do names[#names + 1] = field end
+    live.saved(kind, ref, src, names, me.name, texts)
+end
+
+---Tags each row of a court list with the access its department holds.
+---@param me table caller identity
+---@param kind string
+---@param rows table[] summaries carrying `ref`
+local function annotateShared(me, kind, rows)
+    if not access.isCourt(me) then return end
+    local refs = {}
+    for i = 1, #rows do refs[i] = rows[i].ref end
+    local levels = shares.levelsFor(me, kind, refs)
+    for i = 1, #rows do rows[i].sharedAccess = levels[rows[i].ref] end
+end
+
 ---@type integer Most evidence entries one piece of paperwork may carry.
 local MAX_EVIDENCE = 24
 ---@type integer Longest evidence URL kept, matching the 512-char url column Photos stores.
 local MAX_EVIDENCE_URL = 512
+
+---Encodes evidence in a fixed key order, so the same entries always store the same text.
+---@param list table[] { url, label }
+---@return string json the encoded array, empty when there is nothing
+local function encodeEvidence(list)
+    local parts = {}
+    for i = 1, #list do
+        parts[i] = ('{"url":%s,"label":%s}'):format(json.encode(list[i].url), json.encode(list[i].label or ''))
+    end
+    if #parts == 0 then return '' end
+    return '[' .. table.concat(parts, ',') .. ']'
+end
 
 ---Normalises the evidence array a client sent: hosted URLs with an optional caption, never inline
 ---data. One bad entry is dropped rather than failing the save, so a typo cannot cost the report.
@@ -111,8 +221,7 @@ local function sanitizeEvidence(value)
         end
     end
     if #out == 0 then return nil end
-    local ok, encoded = pcall(json.encode, out)
-    return ok and encoded or nil
+    return encodeEvidence(out)
 end
 
 ---Decodes a stored evidence column back into the array the pane renders.
@@ -132,12 +241,16 @@ local function readEvidence(raw)
     return out
 end
 
----The visibility clause every report read folds in, against the alias `r`: a report with no
----restriction rows is department-wide, otherwise the caller must match one of them.
+---The visibility clause every report read folds in, against the alias `r`. A court reads only police
+---paperwork shared with its department; anyone else reads their domain, narrowed by restriction rows.
 ---@param me table caller identity from access.identity
 ---@return string clause SQL fragment
 ---@return any[] args the identifiers it binds
 function paperwork.visibility(me)
+    if access.isCourt(me) then
+        local clause, args = shares.clause(me, 'report', 'r.ref')
+        return ("(r.`domain` = 'leo' AND %s)"):format(clause), args
+    end
     local rules = access.restrictions(me)
     local parts, args = {}, { access.domain(me) }
     for i = 1, #rules do
@@ -197,6 +310,72 @@ local function readable(me, ref)
     for i = 1, #args do params[#params + 1] = args[i] end
     return MySQL.single.await(
         ('SELECT r.* FROM phone_mdt_reports r WHERE r.ref = ? AND %s LIMIT 1'):format(clause), params)
+end
+
+---@type table<string, boolean> Report fields a live edit may claim.
+local REPORT_FIELDS <const> = { title = true, type = true, body = true, evidence = true, parties = true }
+
+---@type string[] Report fields in the order a save compares them.
+local REPORT_FIELD_ORDER <const> = { 'title', 'type', 'body', 'evidence', 'parties' }
+
+---Resolves a caller's access to one report: a court through its share, anyone else through the
+---visibility clause and their edit keys.
+---@param src integer
+---@param me table
+---@param ref string
+---@return LiveAccess|nil
+local function reportAccess(src, me, ref)
+    local row = readable(me, ref)
+    if not row then return nil end
+    if access.isCourt(me) then
+        local level = shares.accessFor(me, 'report', ref)
+        local edit = level == 'edit' and access.can(src, 'shared.edit')
+        return { row = row, view = true, edit = edit, owner = false, restore = false, fields = edit and REPORT_FIELDS or {}, access = level, texts = { body = row.body or '' } }
+    end
+    local edit = access.can(src, 'reports.edit.any')
+        or (row.author_cid == me.citizenid and access.can(src, 'reports.edit.own'))
+    local owner = row.domain == 'leo' and access.domain(me) == 'leo'
+    return { row = row, view = true, edit = edit, owner = owner, restore = edit, fields = edit and REPORT_FIELDS or {}, texts = { body = row.body or '' } }
+end
+
+---Encodes people and charge lines in a fixed key order, so equal parties always encode equal.
+---@param involved table[] { citizenid, role, notes? }
+---@param charges table[] { citizenid, code, count }
+---@return string json
+local function encodeParties(involved, charges)
+    local people, lines = {}, {}
+    for i = 1, #involved do
+        local p = involved[i]
+        people[i] = ('{"citizenid":%s,"role":%s,"notes":%s}')
+            :format(json.encode(p.citizenid), json.encode(p.role), json.encode(p.notes or ''))
+    end
+    for i = 1, #charges do
+        local c = charges[i]
+        lines[i] = ('{"citizenid":%s,"code":%s,"count":%d}')
+            :format(json.encode(c.citizenid or ''), json.encode(c.code), math.floor(tonumber(c.count) or 1))
+    end
+    return ('{"involved":[%s],"charges":[%s]}'):format(table.concat(people, ','), table.concat(lines, ','))
+end
+
+---The stored parties of a report, in the encoding a revision records.
+---@param id integer report id
+---@return string json
+local function partiesOf(id)
+    local involved = MySQL.query.await(
+        'SELECT citizenid, role, notes FROM phone_mdt_report_involved WHERE report_id = ? ORDER BY id ASC', { id }) or {}
+    local charges = MySQL.query.await(
+        'SELECT citizenid, code, count FROM phone_mdt_report_charges WHERE report_id = ? ORDER BY id ASC', { id }) or {}
+    return encodeParties(involved, charges)
+end
+
+---One report field as a revision records it.
+---@param field string
+---@param row table report row
+---@return string
+local function reportFieldValue(field, row)
+    if field == 'parties' then return partiesOf(row.id) end
+    if field == 'evidence' then return encodeEvidence(readEvidence(row.evidence)) end
+    return tostring(row[field] or '')
 end
 
 ---Composes the full report the detail pane renders, including the caller's own edit rights.
@@ -266,9 +445,14 @@ local function detailOf(me, src, row)
     detail.totalMonths = months
     detail.totalFine   = fine
     detail.caseRef     = caseRef
-    detail.canEdit     = src ~= 0 and (access.can(src, 'reports.edit.any')
-        or (row.author_cid == me.citizenid and access.can(src, 'reports.edit.own'))) or false
-    detail.canDelete   = src ~= 0 and access.can(src, 'reports.delete') or false
+    detail.canEdit, detail.canDelete, detail.canShare = false, false, false
+    if src ~= 0 and me.department then
+        local res = reportAccess(src, me, row.ref)
+        detail.canEdit      = res ~= nil and res.edit or false
+        detail.canDelete    = not access.isCourt(me) and access.can(src, 'reports.delete') or false
+        detail.canShare     = res ~= nil and res.owner and access.can(src, 'shares.create') or false
+        detail.sharedAccess = res and res.access or nil
+    end
     return detail
 end
 
@@ -392,6 +576,7 @@ paperwork.reportsList = access.gated('reports.view', function(_, payload, me)
 
     local out = {}
     for i = 1, #rows do out[i] = summaryOf(rows[i]) end
+    annotateShared(me, 'report', out)
     return util.ok({ rows = out, total = total, page = page, pageSize = PAGE_SIZE })
 end)
 
@@ -436,26 +621,64 @@ local function createReport(src, payload, me)
         { entityType = 'report', entityId = ref, details = { title = draft.title, type = draft.type } }
 end
 
----Amends an existing report. The child rows carry no state of their own, so they are rewritten
----wholesale inside the same transaction as the parent update.
+---Amends an existing report: only the fields named in `payload.fields` (every field when absent),
+---refused while someone else holds one of them, with a revision for each field that changed.
 local function updateReport(src, payload, me)
     local ref = util.limitedString(payload.ref, 16)
-    local row = ref and readable(me, ref)
-    if not row then return util.fail('mdt.reportNotAvailable', 'That report is not available') end
+    local res = ref and reportAccess(src, me, ref)
+    if not ref or not res or not res.edit then return util.fail('mdt.reportNotAvailable', 'That report is not available') end
+    local row = res.row
+
+    local fields = requestedFields(payload.fields, res.fields)
+    local locked = lockRefusal('report', ref, fields, src)
+    if locked then return locked end
+
+    local sharedBody, sharedRev = sharedText('report', ref, 'body', fields, payload)
+    if sharedBody then payload.body = sharedBody end
 
     local draft, refusal = sanitizeReport(payload, me)
     if not draft then return refusal end
 
-    local queries = {
-        {
-            query  = 'UPDATE phone_mdt_reports SET title = ?, type = ?, body = ?, evidence = ?, updated_at = ? WHERE id = ?',
-            values = { draft.title, draft.type, draft.body, draft.evidence, os.time(), row.id },
-        },
-        { query = 'DELETE FROM phone_mdt_report_involved WHERE report_id = ?', values = { row.id } },
-        { query = 'DELETE FROM phone_mdt_report_charges WHERE report_id = ?',  values = { row.id } },
+    local after = {
+        title    = draft.title,
+        type     = draft.type,
+        body     = draft.body,
+        evidence = draft.evidence or '',
+        parties  = encodeParties(draft.involved, draft.charges),
     }
-    for _, q in ipairs(childQueries(row.id, draft)) do queries[#queries + 1] = q end
-    MySQL.transaction.await(queries)
+
+    local changed, sets, values, partiesChanged = {}, {}, {}, false
+    for _, field in ipairs(REPORT_FIELD_ORDER) do
+        if fields[field] then
+            local before = reportFieldValue(field, row)
+            if before ~= after[field] then
+                changed[#changed + 1] = { field = field, before = before, after = after[field] }
+                if field == 'parties' then
+                    partiesChanged = true
+                else
+                    sets[#sets + 1] = ('`%s` = ?'):format(field)
+                    values[#values + 1] = field == 'evidence' and draft.evidence or draft[field]
+                end
+            end
+        end
+    end
+
+    if #changed > 0 then
+        sets[#sets + 1] = 'updated_at = ?'
+        values[#values + 1] = os.time()
+        values[#values + 1] = row.id
+        local queries = {
+            { query = ('UPDATE phone_mdt_reports SET %s WHERE id = ?'):format(table.concat(sets, ', ')), values = values },
+        }
+        if partiesChanged then
+            queries[#queries + 1] = { query = 'DELETE FROM phone_mdt_report_involved WHERE report_id = ?', values = { row.id } }
+            queries[#queries + 1] = { query = 'DELETE FROM phone_mdt_report_charges WHERE report_id = ?',  values = { row.id } }
+            for _, q in ipairs(childQueries(row.id, draft)) do queries[#queries + 1] = q end
+        end
+        MySQL.transaction.await(queries)
+    end
+
+    settle(me, 'report', ref, src, fields, changed, fields.body and { body = { text = draft.body, rev = sharedRev } } or nil)
 
     local saved = MySQL.single.await('SELECT * FROM phone_mdt_reports WHERE id = ?', { row.id })
     if not saved then return util.fail('mdt.reportCouldNotSaved', 'The report could not be saved') end
@@ -463,6 +686,48 @@ local function updateReport(src, payload, me)
     return util.ok({ report = detailOf(me, src, saved) }),
         { entityType = 'report', entityId = ref, details = { title = draft.title, type = draft.type } }
 end
+
+---Puts one report field back to an earlier value through the ordinary amend path.
+---@param src integer
+---@param me table
+---@param ref string
+---@param field string
+---@param value string
+---@return table envelope
+local function restoreReport(src, me, ref, field, value)
+    local res = reportAccess(src, me, ref)
+    if not res or not res.restore then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
+
+    local current = detailOf(me, src, res.row)
+    local payload = {
+        ref       = ref,
+        restoring = true,
+        fields    = { field },
+        title    = current.title,
+        type     = current.type,
+        body     = current.body,
+        evidence = current.evidence,
+        involved = current.involved,
+        charges  = current.charges,
+    }
+
+    if field == 'parties' or field == 'evidence' then
+        local ok, decoded = pcall(json.decode, value)
+        decoded = ok and type(decoded) == 'table' and decoded or {}
+        if field == 'evidence' then
+            payload.evidence = decoded
+        else
+            payload.involved = decoded.involved or {}
+            payload.charges  = decoded.charges or {}
+        end
+    else
+        payload[field] = value
+    end
+
+    return (updateReport(src, payload, me))
+end
+
+live.register('report', { resolve = reportAccess, restore = restoreReport })
 
 ---Files or amends a report. Filing needs reports.create; amending your own needs
 ---reports.edit.own, and amending anyone else's needs reports.edit.any.
@@ -478,6 +743,7 @@ function paperwork.reportsSave(src, payload)
 
     local author = MySQL.scalar.await('SELECT author_cid FROM phone_mdt_reports WHERE ref = ? LIMIT 1', { ref })
     if not author then return util.fail('mdt.reportNotAvailable', 'That report is not available') end
+    if access.isCourt(me) then return access.audited('shared.edit', updateReport)(src, payload) end
 
     local key = author == me.citizenid and 'reports.edit.own' or 'reports.edit.any'
     return access.audited(key, updateReport)(src, payload)
@@ -485,6 +751,7 @@ end
 
 ---Deletes a report and everything hanging off it. The case link goes too; the case survives.
 paperwork.reportsDelete = access.audited('reports.delete', function(_, payload, me)
+    if access.isCourt(me) then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and readable(me, ref)
     if not row then return util.fail('mdt.reportNotAvailable', 'That report is not available') end
@@ -496,6 +763,9 @@ paperwork.reportsDelete = access.audited('reports.delete', function(_, payload, 
         { query = 'DELETE FROM phone_mdt_case_reports WHERE report_id = ?',        values = { row.id } },
         { query = 'DELETE FROM phone_mdt_reports WHERE id = ?',                    values = { row.id } },
     })
+    shares.forget('report', ref)
+    revisions.forget('report', ref)
+    live.close('report', ref)
 
     return util.ok({ ref = ref }), { entityType = 'report', entityId = ref, details = { title = row.title } }
 end)
@@ -565,9 +835,12 @@ function paperwork.exportDeleteReport(ref)
     local value = util.limitedString(type(ref) == 'string' and ref or tostring(ref or ''), 32)
     if not value then return false end
     local row = tonumber(value)
-        and MySQL.single.await('SELECT id FROM phone_mdt_reports WHERE id = ? LIMIT 1', { tonumber(value) })
-        or MySQL.single.await('SELECT id FROM phone_mdt_reports WHERE ref = ? LIMIT 1', { value })
+        and MySQL.single.await('SELECT id, ref FROM phone_mdt_reports WHERE id = ? LIMIT 1', { tonumber(value) })
+        or MySQL.single.await('SELECT id, ref FROM phone_mdt_reports WHERE ref = ? LIMIT 1', { value })
     if not row then return false end
+    shares.forget('report', row.ref)
+    revisions.forget('report', row.ref)
+    live.close('report', row.ref)
 
     MySQL.transaction.await({
         { query = 'DELETE FROM phone_mdt_report_charges WHERE report_id = ?',      values = { row.id } },
@@ -705,29 +978,69 @@ local CASE_SELECT_ONE = [[
 ---that opened it, and an unstamped row is shared.
 local CASE_SCOPE = '(c.department = ? OR c.department = ?)'
 
----Loads a case row of the caller's own department by ref, or nil. Reads the detail projection:
----every caller feeds the row to caseDetail, which needs the summary and evidence bodies.
+---Loads a case row by ref: a court's only when shared with its department, anyone else's only from
+---their own department. Reads the detail projection caseDetail needs.
 ---@param me table caller identity from access.identity
 ---@param ref string
 ---@return table|nil row
 local function caseRow(me, ref)
+    if access.isCourt(me) then
+        local clause, args = shares.clause(me, 'case', 'c.ref')
+        return MySQL.single.await(
+            ('%s WHERE c.ref = ? AND %s LIMIT 1'):format(CASE_SELECT_ONE, clause), { ref, args[1], args[2] })
+    end
     return MySQL.single.await(
         ('%s WHERE c.ref = ? AND %s LIMIT 1'):format(CASE_SELECT_ONE, CASE_SCOPE), { ref, me.job, '' })
 end
 
----Composes the case the detail pane renders.
+---@type table<string, boolean> Case fields the owning department's editors may write.
+local CASE_FIELDS <const> = { title = true, summary = true, evidence = true, status = true, priority = true }
+
+---@type table<string, boolean> Case fields a court with an editable share may write.
+local CASE_COURT_FIELDS <const> = { summary = true, evidence = true }
+
+---@type string[] Case fields in the order a save compares them.
+local CASE_FIELD_ORDER <const> = { 'title', 'summary', 'evidence', 'status', 'priority' }
+
+---Resolves a caller's access to one case: a court through its share, anyone else through their department.
+---@param src integer
+---@param me table
+---@param ref string
+---@return LiveAccess|nil
+local function caseAccess(src, me, ref)
+    local row = caseRow(me, ref)
+    if not row then return nil end
+    if access.isCourt(me) then
+        local level = shares.accessFor(me, 'case', ref)
+        local edit = level == 'edit' and access.can(src, 'shared.edit')
+        return { row = row, view = true, edit = edit, owner = false, restore = false, fields = edit and CASE_COURT_FIELDS or {}, access = level, texts = { summary = row.summary or '' } }
+    end
+    local edit = access.can(src, 'cases.edit')
+    return { row = row, view = true, edit = edit, owner = access.domain(me) == 'leo', restore = edit, fields = edit and CASE_FIELDS or {}, texts = { summary = row.summary or '' } }
+end
+
+---Composes the case the detail pane renders, with what the caller may do to it.
 ---@param src integer player server id
 ---@param row table case DB row from CASE_SELECT
+---@param me table|nil caller identity; nil for a trusted export
 ---@return table case
-local function caseDetail(src, row)
+local function caseDetail(src, row, me)
     local detail = caseSummaryOf(row)
     detail.summary   = row.summary or ''
     detail.evidence  = readEvidence(row.evidence)
     detail.officers  = caseOfficers(row.id)
     detail.notes     = caseNotes(row.id)
     detail.reports   = caseReports(row.id)
-    detail.canEdit   = access.can(src, 'cases.edit')
-    detail.canDelete = access.can(src, 'cases.delete')
+    detail.canEdit, detail.canManage, detail.canDelete, detail.canShare = false, false, false, false
+    if src ~= 0 and me then
+        local court = access.isCourt(me)
+        local res = caseAccess(src, me, row.ref)
+        detail.canEdit      = res ~= nil and res.edit or false
+        detail.canManage    = not court and access.can(src, 'cases.edit')
+        detail.canDelete    = not court and access.can(src, 'cases.delete')
+        detail.canShare     = res ~= nil and res.owner and access.can(src, 'shares.create') or false
+        detail.sharedAccess = res and res.access or nil
+    end
     return detail
 end
 
@@ -755,6 +1068,10 @@ end
 ---A page of cases, filtered by status, priority and a title or ref search.
 paperwork.casesList = access.gated('cases.view', function(_, payload, me)
     local where, params = { CASE_SCOPE }, { me.job, '' }
+    if access.isCourt(me) then
+        local clause, args = shares.clause(me, 'case', 'c.ref')
+        where, params = { clause }, { args[1], args[2] }
+    end
 
     local status = type(payload.status) == 'string' and payload.status or nil
     if status and STATUSES[status] then
@@ -787,6 +1104,7 @@ paperwork.casesList = access.gated('cases.view', function(_, payload, me)
 
     local out = {}
     for i = 1, #rows do out[i] = caseSummaryOf(rows[i]) end
+    annotateShared(me, 'case', out)
     return util.ok({ rows = out, total = total, page = page, pageSize = PAGE_SIZE })
 end)
 
@@ -795,7 +1113,7 @@ paperwork.casesGet = access.gated('cases.view', function(src, payload, me)
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and caseRow(me, ref)
     if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
-    return util.ok({ case = caseDetail(src, row) })
+    return util.ok({ case = caseDetail(src, row, me) })
 end)
 
 ---Opens a new case file and puts its creator on it as the primary officer.
@@ -823,45 +1141,113 @@ local function createCase(src, payload, me)
         VALUES (?, ?, 'primary', ?, ?)
     ]], { id, me.citizenid, me.citizenid, now })
 
-    return util.ok({ case = caseDetail(src, caseRow(me, ref)) }),
+    return util.ok({ case = caseDetail(src, caseRow(me, ref), me) }),
         { entityType = 'case', entityId = ref, details = { title = title } }
 end
 
----Amends an existing case file.
+---Amends an existing case file: only the fields named in `payload.fields` (every allowed field when
+---absent), refused while someone else holds one of them, with a revision per changed field.
 local function updateCase(src, payload, me)
     local ref = util.limitedString(payload.ref, 16)
-    local row = ref and caseRow(me, ref)
-    if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
+    local res = ref and caseAccess(src, me, ref)
+    if not ref or not res or not res.edit then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
+    local row = res.row
+
+    local fields = requestedFields(payload.fields, res.fields)
+    local locked = lockRefusal('case', ref, fields, src)
+    if locked then return locked end
+
+    local sharedSummary, sharedRev = sharedText('case', ref, 'summary', fields, payload)
+    if sharedSummary then payload.summary = sharedSummary end
 
     local title = util.limitedString(payload.title, tonumber(LIMITS.CaseTitle) or 160)
-    if not title then return util.fail('mdt.titleRequired', 'A title is required') end
+    if fields.title and not title then return util.fail('mdt.titleRequired', 'A title is required') end
 
-    local summary  = util.limitedString(payload.summary, tonumber(LIMITS.CaseSummary) or 4000) or ''
-    local status   = STATUSES[payload.status] and payload.status or row.status
-    local priority = PRIORITIES[payload.priority] and payload.priority or row.priority
+    local evidence = sanitizeEvidence(payload.evidence)
+    local after = {
+        title    = title or row.title,
+        summary  = util.limitedString(payload.summary, tonumber(LIMITS.CaseSummary) or 4000) or '',
+        evidence = evidence or '',
+        status   = STATUSES[payload.status] and payload.status or row.status,
+        priority = PRIORITIES[payload.priority] and payload.priority or row.priority,
+    }
+    local before = {
+        title    = row.title,
+        summary  = row.summary or '',
+        evidence = encodeEvidence(readEvidence(row.evidence)),
+        status   = row.status,
+        priority = row.priority,
+    }
 
-    MySQL.update.await([[
-        UPDATE phone_mdt_cases SET title = ?, summary = ?, evidence = ?, status = ?, priority = ?, updated_at = ?
-        WHERE id = ?
-    ]], { title, summary, sanitizeEvidence(payload.evidence), status, priority, os.time(), row.id })
+    local changed, sets, values = {}, {}, {}
+    for _, field in ipairs(CASE_FIELD_ORDER) do
+        if fields[field] and before[field] ~= after[field] then
+            changed[#changed + 1] = { field = field, before = before[field], after = after[field] }
+            sets[#sets + 1] = ('`%s` = ?'):format(field)
+            values[#values + 1] = field == 'evidence' and evidence or after[field]
+        end
+    end
 
-    return util.ok({ case = caseDetail(src, caseRow(me, ref)) }),
-        { entityType = 'case', entityId = ref, details = { title = title, status = status, priority = priority } }
+    if #changed > 0 then
+        sets[#sets + 1] = 'updated_at = ?'
+        values[#values + 1] = os.time()
+        values[#values + 1] = row.id
+        MySQL.update.await(('UPDATE phone_mdt_cases SET %s WHERE id = ?'):format(table.concat(sets, ', ')), values)
+    end
+
+    settle(me, 'case', ref, src, fields, changed, fields.summary and { summary = { text = after.summary, rev = sharedRev } } or nil)
+
+    return util.ok({ case = caseDetail(src, caseRow(me, ref), me) }),
+        { entityType = 'case', entityId = ref, details = { title = after.title, status = after.status, priority = after.priority } }
 end
+
+---Puts one case field back to an earlier value through the ordinary amend path.
+---@param src integer
+---@param me table
+---@param ref string
+---@param field string
+---@param value string
+---@return table envelope
+local function restoreCase(src, me, ref, field, value)
+    local res = caseAccess(src, me, ref)
+    if not res or not res.restore then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
+
+    local row = res.row
+    local payload = {
+        ref       = ref,
+        restoring = true,
+        fields    = { field },
+        title    = row.title,
+        summary  = row.summary or '',
+        evidence = readEvidence(row.evidence),
+        status   = row.status,
+        priority = row.priority,
+    }
+    if field == 'evidence' then
+        payload.evidence = readEvidence(value)
+    else
+        payload[field] = value
+    end
+    return (updateCase(src, payload, me))
+end
+
+live.register('case', { resolve = caseAccess, restore = restoreCase })
 
 ---Opens or amends a case file.
 ---@param src integer player server id
 ---@param payload table client draft
 ---@return table envelope
 function paperwork.casesSave(src, payload)
-    if not access.canAccess(src) then return util.fail('mdt.doNotHaveAccessTerminal', 'You do not have access to this terminal') end
+    local me = access.identity(src)
+    if not me then return util.fail('mdt.doNotHaveAccessTerminal', 'You do not have access to this terminal') end
     local ref = util.limitedString(payload.ref, 16)
     if not ref then return access.audited('cases.create', createCase)(src, payload) end
-    return access.audited('cases.edit', updateCase)(src, payload)
+    return access.audited(access.isCourt(me) and 'shared.edit' or 'cases.edit', updateCase)(src, payload)
 end
 
 ---Deletes a case file. Its reports are unlinked, never deleted.
 paperwork.casesDelete = access.audited('cases.delete', function(_, payload, me)
+    if access.isCourt(me) then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and caseRow(me, ref)
     if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
@@ -872,15 +1258,24 @@ paperwork.casesDelete = access.audited('cases.delete', function(_, payload, me)
         { query = 'DELETE FROM phone_mdt_case_reports WHERE case_id = ?',  values = { row.id } },
         { query = 'DELETE FROM phone_mdt_cases WHERE id = ?',              values = { row.id } },
     })
+    shares.forget('case', ref)
+    revisions.forget('case', ref)
+    live.close('case', ref)
 
     return util.ok({ ref = ref }), { entityType = 'case', entityId = ref, details = { title = row.title } }
 end)
 
----Adds a note to a case thread.
-paperwork.casesNote = access.audited('cases.edit', function(src, payload, me)
+---Adds a note to a case thread. A court needs an editable share to write one.
+---@param src integer
+---@param payload table
+---@param me table
+---@return table envelope, table? audit
+local function noteCase(src, payload, me)
     local ref = util.limitedString(payload.ref, 16)
-    local row = ref and caseRow(me, ref)
-    if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
+    local res = ref and caseAccess(src, me, ref)
+    if not ref or not res then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
+    if access.isCourt(me) and not res.edit then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
+    local row = res.row
 
     local body = util.limitedString(payload.body, tonumber(LIMITS.CaseNote) or 1000)
     if not body then return util.fail('mdt.writeSomethingFirst', 'Write something first') end
@@ -893,12 +1288,24 @@ paperwork.casesNote = access.audited('cases.edit', function(src, payload, me)
         },
         { query = 'UPDATE phone_mdt_cases SET updated_at = ? WHERE id = ?', values = { now, row.id } },
     })
+    live.saved('case', ref, src, { 'notes' }, me.name)
 
-    return util.ok({ case = caseDetail(src, caseRow(me, ref)) }), { entityType = 'case', entityId = ref }
-end)
+    return util.ok({ case = caseDetail(src, caseRow(me, ref), me) }), { entityType = 'case', entityId = ref }
+end
+
+---Adds a note to a case thread, under the key the caller's terminal edits with.
+---@param src integer
+---@param payload table
+---@return table envelope
+function paperwork.casesNote(src, payload)
+    local me = access.identity(src)
+    if not me then return util.fail('mdt.doNotHaveAccessTerminal', 'You do not have access to this terminal') end
+    return access.audited(access.isCourt(me) and 'shared.edit' or 'cases.edit', noteCase)(src, payload)
+end
 
 ---Puts an officer on a case, or takes them off it.
 paperwork.casesAssign = access.audited('cases.edit', function(src, payload, me)
+    if access.isCourt(me) then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and caseRow(me, ref)
     if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
@@ -920,13 +1327,15 @@ paperwork.casesAssign = access.audited('cases.edit', function(src, payload, me)
         ]], { row.id, cid, role, me.citizenid, now })
     end
     MySQL.update.await('UPDATE phone_mdt_cases SET updated_at = ? WHERE id = ?', { now, row.id })
+    live.saved('case', ref, src, { 'officers' }, me.name)
 
-    return util.ok({ case = caseDetail(src, caseRow(me, ref)) }),
+    return util.ok({ case = caseDetail(src, caseRow(me, ref), me) }),
         { entityType = 'case', entityId = ref, details = { officer = cid, assigned = payload.assigned ~= false } }
 end)
 
 ---Links a report into a case, or unlinks it.
 paperwork.casesLinkReport = access.audited('cases.edit', function(src, payload, me)
+    if access.isCourt(me) then return util.fail('mdt.rankDoesNotAllow', 'Your rank does not allow that') end
     local ref = util.limitedString(payload.ref, 16)
     local row = ref and caseRow(me, ref)
     if not row then return util.fail('mdt.caseNoLongerExists', 'That case no longer exists') end
@@ -945,8 +1354,9 @@ paperwork.casesLinkReport = access.audited('cases.edit', function(src, payload, 
             'INSERT IGNORE INTO phone_mdt_case_reports (case_id, report_id) VALUES (?, ?)', { row.id, report.id })
     end
     MySQL.update.await('UPDATE phone_mdt_cases SET updated_at = ? WHERE id = ?', { os.time(), row.id })
+    live.saved('case', ref, src, { 'reports' }, me.name)
 
-    return util.ok({ case = caseDetail(src, caseRow(me, ref)) }),
+    return util.ok({ case = caseDetail(src, caseRow(me, ref), me) }),
         { entityType = 'case', entityId = ref, details = { report = reportRef, linked = payload.linked ~= false } }
 end)
 

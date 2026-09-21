@@ -36,6 +36,11 @@ local SHIPPED_PERMISSIONS = {
     ['weapons.edit'] = 1,
     ['cameras.view'] = 1,
     ['cctv.view']    = 1,
+    ['shares.create'] = 0,
+    ['shares.revoke'] = 0,
+    ['shared.edit']   = 0,
+    ['offences.manage'] = 4,
+    ['sops.manage']     = 4,
 }
 
 ---@type table<string, number> Permission key -> minimum grade. An absent key is denied. Built as a
@@ -88,6 +93,7 @@ local KEY_DOMAIN = {
     ['profiles.view']       = { leo = true, doj = true },
     ['warrants.view']       = { leo = true, doj = true },
     ['offences.view']       = { leo = true, doj = true },
+    ['offences.manage']     = { leo = true, doj = true },
 
     ['court.view']          = { doj = true },
     ['court.file']          = { doj = true },
@@ -336,23 +342,15 @@ function access.isBench(me)
 end
 
 ---The restriction identifiers that admit this caller to a record: their own citizenid, their job,
----and their department type. Report queries fold these into an IN clause, so a department's
----paperwork is not merely un-editable by outsiders, it is un-listable.
----
----A court also carries the `leo` jobtype, because discovery is the point of the terminal: a
----defence attorney who cannot read the report behind the charge cannot argue the case. It does
----NOT carry any individual police job, so paperwork a department restricted to itself stays shut.
+---and their department type. A court reaches police paperwork only through a share, never here.
 ---@param me table caller identity from access.identity
 ---@return { type: string, identifier: string }[]
 function access.restrictions(me)
-    local domain = domainOf(me.department)
-    local out = {
+    return {
         { type = 'citizenid', identifier = me.citizenid },
         { type = 'job',       identifier = me.job },
-        { type = 'jobtype',   identifier = domain },
+        { type = 'jobtype',   identifier = domainOf(me.department) },
     }
-    if domain == 'doj' then out[#out + 1] = { type = 'jobtype', identifier = 'leo' } end
-    return out
 end
 
 ---Every connected player whose active job has a terminal. Dispatch, chat and bulletins fan their
@@ -363,6 +361,18 @@ function access.audience()
     for _, id in ipairs(GetPlayers()) do
         local src = tonumber(id)
         if src and access.canAccess(src) then out[#out + 1] = src end
+    end
+    return out
+end
+
+---Every connected player whose active job is one department. A share reaches only the court it names.
+---@param jobName string department job
+---@return integer[] sources
+function access.audienceOf(jobName)
+    local out = {}
+    for _, id in ipairs(GetPlayers()) do
+        local src = tonumber(id)
+        if src and job.getName(src) == jobName then out[#out + 1] = src end
     end
     return out
 end

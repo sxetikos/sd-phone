@@ -7,6 +7,7 @@ import { useAsyncData } from '@/hooks/useAsyncData';
 import { useIosPush } from '@/hooks/useIosPush';
 import { useSessionState } from '@/hooks/useSessionState';
 import { useNuiEvent } from '@/hooks/useNuiEvent';
+import { useDeeplinkTarget } from '@/shell/deeplink';
 import { AlertDialog } from '@/ui/AlertDialog';
 import { PromptDialog } from '@/ui/PromptDialog';
 import { EmptyState } from '@/ui/EmptyState';
@@ -45,6 +46,16 @@ export function Homes({ onClose: _onClose }: { onClose: () => void }) {
 
     const open = homes.find(h => h.id === openId) ?? null;
 
+    const [pendingHomeId, setPendingHomeId] = useState<string | null>(null);
+    useDeeplinkTarget('homes', target => setPendingHomeId(String(target.homeId)));
+    useEffect(() => {
+        if (!pendingHomeId) return;
+        const home = (list?.homes ?? (isFiveM ? [] : HOMES)).find(h => String(h.id) === pendingHomeId);
+        if (!home) return;
+        setOpenId(home.id);
+        setPendingHomeId(null);
+    }, [pendingHomeId, list, setOpenId]);
+
     const didEnter = useRef(false);
     useEffect(() => { if (homes.length) didEnter.current = true; }, [homes.length]);
 
@@ -65,7 +76,7 @@ export function Homes({ onClose: _onClose }: { onClose: () => void }) {
                 </div>
             )}
 
-            {open && <HomeDetail h={open} caps={caps} animateIn={didEnter.current} onBack={() => setOpenId(null)} />}
+            {open && <HomeDetail key={open.id} h={open} caps={caps} animateIn={didEnter.current} onBack={() => setOpenId(null)} />}
         </div>
     );
 }

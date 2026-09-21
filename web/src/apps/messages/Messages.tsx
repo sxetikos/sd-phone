@@ -24,7 +24,7 @@ import { useTypingPeers } from '@/shared/chat/useTypingPeers';
 import type { Reaction } from '@/shared/chat/data';
 import { useContacts, useContactsStore } from '@/stores/contactsStore';
 import { digits } from '@/lib/format';
-import { peekMessagesTarget, clearMessagesTarget } from '@/shell/deeplink';
+import { peekMessagesTarget, clearMessagesTarget, useDeeplinkTarget } from '@/shell/deeplink';
 import { saveNewContact } from '@/stores/contactsStore';
 import type { Contact as PhoneContact } from '@/apps/phone/data';
 
@@ -59,11 +59,21 @@ export function Messages({ onClose }: { onClose: () => void }) {
         setHydratingId(id);
         void loadThread(id).then(full => {
             if (!full) return;
-            setConversations(prev => prev.map(c => (c.id === id
-                ? { ...c, messages: full.messages, participants: full.participants, unread: 0, partial: false }
-                : c)));
+            setConversations(prev => (prev.some(c => c.id === id)
+                ? prev.map(c => (c.id === id
+                    ? { ...c, messages: full.messages, participants: full.participants, unread: 0, partial: false }
+                    : c))
+                : (openIdRef.current === id ? [{ ...full, id, unread: 0, partial: false }, ...prev] : prev)));
         }).catch(() => null).finally(() => setHydratingId(prev => (prev === id ? null : prev)));
     }, []);
+
+    useDeeplinkTarget('messages', target => {
+        setComposing(false);
+        setOpenId(target.conversationId);
+        markReadApi(target.conversationId);
+        setConversations(prev => markConversationRead(prev, target.conversationId));
+        hydrateThread(target.conversationId);
+    });
 
     useEffect(() => {
         clearMessagesTarget();
@@ -71,7 +81,10 @@ export function Messages({ onClose }: { onClose: () => void }) {
         void loadMessages().then(state => {
             if (!active) return;
             cacheMessages(state);
-            setConversations(state.conversations);
+            setConversations(prev => [
+                ...prev.filter(c => c.id === openIdRef.current && c.partial === false && !state.conversations.some(f => f.id === c.id)),
+                ...state.conversations,
+            ]);
             setContacts(state.contacts);
 
             const restored = openIdRef.current;
